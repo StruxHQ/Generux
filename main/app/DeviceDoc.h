@@ -30,13 +30,21 @@
 namespace DeviceDoc {
 
 inline constexpr const char* DESCRIPTION =
-    "Strux template device - an ESP32 reference firmware whose only feature is an "
-    "LED that mirrors the relay link.";
+    "Wavy square-wave generator - one pin, 50% duty, 5 Hz to 100 kHz, set from "
+    "the web UI.";
 
 inline constexpr const char* INSTRUCTIONS =
-    "This is the Strux template firmware. It is a foundation for real products, so "
-    "the only product-specific thing on it is a demonstration: an LED that is lit "
-    "while the device is connected to its relay server and dark when it is not.\n"
+    "This is Wavy, a square-wave generator built on the Strux template. It drives "
+    "one pin with a 50% duty square wave at a frequency you choose.\n"
+    "\n"
+    "The square wave\n"
+    "  `wave get` reports whether the output is on, the frequency set (`freq`), the "
+    "frequency actually produced (`actual`, 0 while off) and the allowed range "
+    "(`min`/`max`, in Hz). `wave set -freq 25000 -enabled true` changes either or "
+    "both; omitted arguments keep their value. Changes apply at once and are "
+    "persisted, so the output resumes after a reboot. `actual` can differ slightly "
+    "from `freq` when 80 MHz is not a whole multiple of it. The pin is GPIO4 on the "
+    "ESP32-C3 SuperMini and GPIO25 on the ESP32 DevKit; it is held low while off.\n"
     "\n"
     "Discovering what it can do\n"
     "  Every command declares itself. `help describe` returns every category, every "
@@ -44,8 +52,9 @@ inline constexpr const char* INSTRUCTIONS =
     "`help list` is the same registry in smaller pieces. Nothing about a command is "
     "written down twice, so what those return is always this exact build.\n"
     "\n"
-    "The demonstration feature\n"
-    "  `led get` reports three separate facts: whether the indicator is enabled, "
+    "The relay LED\n"
+    "  The board LED is lit while the device is connected to its relay server. "
+    "`led get` reports three separate facts: whether the indicator is enabled, "
     "whether the relay link is up, and whether the LED is lit at this instant. "
     "`led set -enabled false` keeps the board dark without affecting the link. The "
     "setting is persisted, so it survives a reboot.\n"

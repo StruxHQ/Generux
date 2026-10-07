@@ -1,10 +1,10 @@
-# Strux
+# Wavy
 
-*Start structured. Make it your own.*
+*A square-wave generator you set from a browser.*
 
-Strux is a flexible foundation for building embedded applications on ESP32. It gives you a clean, modular starting point with WiFi, a web UI, OTA updates, and the infrastructure to grow your project without fighting your own codebase.
+Wavy drives one pin with a 50% duty square wave, 5 Hz to 100 kHz, at a frequency you set from its web UI (or the `wave` commands). It runs on an ESP32-C3 SuperMini (output on GPIO4) or an ESP32 DevKit (GPIO25).
 
-It's not a framework that forces you into rigid patterns. It's a well-organized starting point that you copy, rename, and shape into whatever you're building.
+It is built on [Strux](https://github.com/vanBassum/Strux), an ESP32 firmware foundation that provides the WiFi, web UI, OTA updates, settings and command infrastructure. The framework lives in `main/strux/` and keeps its own names, so improvements can still be pulled across from the template. The rest of this README describes that foundation.
 
 <img width="1096" height="591" alt="image" src="https://github.com/user-attachments/assets/cc282e06-f84b-497d-8e5a-3e04add95bac" />
 
@@ -12,7 +12,7 @@ It's not a framework that forces you into rigid patterns. It's a well-organized 
 
 ## What's Included
 
-- **WiFi** — Station mode with automatic AP fallback (`Strux-AP`) after failed connections
+- **WiFi** — Station mode with automatic AP fallback (`Wavy-AP`) after failed connections
 - **Web UI** — React + TypeScript dashboard served from flash, accessible from any browser
 - **OTA Updates** — Dual-partition firmware updates, no USB after initial flash. The web UI is linked into the app image, so one OTA carries both
 - **Live Console** — Stream device logs to the browser in real time over WebSocket
@@ -34,7 +34,7 @@ It's not a framework that forces you into rigid patterns. It's a well-organized 
 ## Project Structure
 
 ```
-Strux/
+Wavy/
 ├── main/                              # ESP-IDF firmware
 │   ├── main.cpp                       # Boot sequence — just Init() calls
 │   ├── strux/                         # THE FRAMEWORK — pull improvements into a fork
@@ -156,7 +156,7 @@ If pnpm is not available, the firmware still builds — you just won't have a we
 
 If you just want to flash a pre-built release without installing ESP-IDF, you can use the **ESP Web Flasher** directly from your browser:
 
-1. Download the latest `Strux-factory.bin` from [GitHub Releases](https://github.com/vanBassum/Strux/releases)
+1. Download the latest `Wavy-<board>-factory.bin` from [GitHub Releases](https://github.com/vanBassum/Wavy/releases)
 2. Open [ESP Web Flasher](https://espressif.github.io/esptool-js/)
 3. Connect your ESP32 via USB
 4. Select the serial port, set flash offset to `0x0`, and upload the factory binary
@@ -232,8 +232,8 @@ The CI pipeline produces two artifacts per release:
 
 | File | Purpose |
 |------|---------|
-| `Strux-factory.bin` | Full image (bootloader + partition table + app, web UI included) for initial flash |
-| `Strux-app.bin` | Firmware only, for OTA update via web UI — carries the web UI too |
+| `Wavy-<board>-factory.bin` | Full image (bootloader + partition table + app, web UI included) for initial flash |
+| `Wavy-<board>-app.bin` | Firmware only, for OTA update via web UI — carries the web UI too |
 
 ---
 
@@ -241,7 +241,7 @@ The CI pipeline produces two artifacts per release:
 
 1. On boot, attempts to connect to the configured WiFi network (stored in NVS)
 2. Retries up to 3 times on failure
-3. Falls back to an open access point (`Strux-AP`) if all retries fail
+3. Falls back to an open access point (`Wavy-AP`) if all retries fail
 4. Connect to the AP and access the web UI to configure WiFi credentials
 
 ---

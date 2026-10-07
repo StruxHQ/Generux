@@ -15,6 +15,9 @@ namespace BoardConfig
     static constexpr int LED_PIN = 2;
     static constexpr bool LED_ACTIVE_HIGH = true;
 
+    // Square-wave output (LEDC). GPIO25: free on the DevKit header and not a strapping pin.
+    static constexpr int SQUARE_WAVE_PIN = 25;
+
     // Add project-specific pin definitions below.
     // Examples:
     //   static constexpr int MODBUS_TX_PIN = 17;

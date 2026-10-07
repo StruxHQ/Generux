@@ -1,5 +1,5 @@
 import { useEffect } from "react"
-import { LightbulbIcon, TerminalIcon, SettingsIcon, DownloadIcon } from "lucide-react"
+import { AudioWaveformIcon, TerminalIcon, SettingsIcon, DownloadIcon } from "lucide-react"
 import {
   Sidebar,
   SidebarContent,
@@ -29,7 +29,7 @@ import { DeviceInfoDialog } from "@/components/DeviceInfoDialog"
 // taking a place in the navigation beside the product. See
 // docs/reasoning/2026-09-09-22h00.
 const navItems = [
-  { title: "LED", icon: LightbulbIcon, page: "home" as const },
+  { title: "Square wave", icon: AudioWaveformIcon, page: "home" as const },
   { title: "Console", icon: TerminalIcon, page: "console" as const },
   { title: "Settings", icon: SettingsIcon, page: "settings" as const },
   { title: "Firmware", icon: DownloadIcon, page: "firmware" as const },

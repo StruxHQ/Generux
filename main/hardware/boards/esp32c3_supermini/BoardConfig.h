@@ -27,6 +27,9 @@ namespace BoardConfig
     //   GPIO20/GPIO21 UART0 RX/TX (broken out, free if the console is on USB)
     // Everything else (GPIO0-GPIO7, GPIO10) is free.
 
+    // Square-wave output (LEDC). GPIO4: free, not a strapping pin, and broken out on the SuperMini header.
+    static constexpr int SQUARE_WAVE_PIN = 4;
+
     // Add project-specific pin definitions below.
     // Examples:
     //   static constexpr int MODBUS_TX_PIN = 21;

@@ -11,6 +11,7 @@ void BoardContext::Init()
     }
 
     led_.Init();
+    squareWave_.Init();
 
     init.SetReady();
     ESP_LOGI(TAG, "Initialized");

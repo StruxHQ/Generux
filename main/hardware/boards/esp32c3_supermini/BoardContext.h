@@ -4,6 +4,7 @@
 #include "BoardConfig.h"
 #include "interfaces/BoardProvider.h"
 #include "drivers/GpioLed.h"
+#include "drivers/LedcSquareWave.h"
 
 // ──────────────────────────────────────────────────────────────
 // The board layer's context for the ESP32-C3 SuperMini: owns every
@@ -43,10 +44,12 @@ public:
     void Init();
 
     Led &GetLed() override { return led_; }
+    SquareWave &GetSquareWave() override { return squareWave_; }
 
 private:
     InitState initState_;
 
     // Hardware instances — buses first, then the drivers that use them.
     GpioLed led_{ BoardConfig::LED_PIN, BoardConfig::LED_ACTIVE_HIGH };
+    LedcSquareWave squareWave_{ BoardConfig::SQUARE_WAVE_PIN };
 };

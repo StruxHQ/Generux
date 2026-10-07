@@ -1,6 +1,7 @@
 #pragma once
 
 #include "interfaces/Led.h"
+#include "interfaces/SquareWave.h"
 
 // ──────────────────────────────────────────────────────────────
 // The board layer's provider: the ROLES every board owes, in application
@@ -33,4 +34,5 @@ public:
     virtual ~BoardProvider() = default;
 
     virtual Led& GetLed() = 0;
+    virtual SquareWave& GetSquareWave() = 0;
 };

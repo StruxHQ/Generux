@@ -489,6 +489,17 @@ class BackendService {
     return this.send<LedState>("led set", params)
   }
 
+  async getWave(): Promise<WaveState> {
+    return this.send<WaveState>("wave get")
+  }
+
+  /** Sets the frequency and/or switches the output. Omitted fields keep their value.
+   *  `persist: false` applies without writing flash (sweep steps). An out-of-range
+   *  frequency comes back with `ok: false` and `error`, not a throw. */
+  async setWave(params: { enabled?: boolean; freq?: number; persist?: boolean }): Promise<WaveState> {
+    return this.send<WaveState>("wave set", params)
+  }
+
   /** Returns false on wrong password; throws on connection failure. On success
    *  stores the session key and marks the connection authenticated. */
   async login(password: string): Promise<boolean> {
@@ -838,3 +849,16 @@ export interface PartitionsResponse {
   partitions: Partition[]
 }
 
+export interface WaveState {
+  ok: boolean
+  error?: string
+  /** Whether the output is running. */
+  enabled: boolean
+  /** The frequency set, in Hz. */
+  freq: number
+  /** The frequency the hardware actually produces, in Hz; 0 while off. */
+  actual: number
+  /** The range `freq` must be in, in Hz. */
+  min: number
+  max: number
+}

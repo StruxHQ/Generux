@@ -6,6 +6,7 @@
 #include "SystemManager.h"
 #include "DeviceDoc.h"
 #include "LedManager/LedManager.h"
+#include "WaveManager/WaveManager.h"
 
 // The application layer's context: owns this product's managers and answers AppProvider.
 //
@@ -38,15 +39,18 @@ public:
             DeviceDoc::DESCRIPTION, DeviceDoc::INSTRUCTIONS);
 
         ledManager_.Init();
+        waveManager_.Init();
     }
 
     StruxProvider& getStrux() override { return strux_; }
     BoardContext& getBoard() override { return board_; }
     LedManager& getLedManager() override { return ledManager_; }
+    WaveManager& getWaveManager() override { return waveManager_; }
 
 private:
     BoardContext& board_;
     StruxProvider& strux_;
 
     LedManager ledManager_{*this};
+    WaveManager waveManager_{*this};
 };

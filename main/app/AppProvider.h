@@ -13,6 +13,7 @@
 class BoardContext;
 class StruxProvider;
 class LedManager;
+class WaveManager;
 
 class AppProvider
 {
@@ -25,4 +26,5 @@ public:
 
     // ── This application's own managers ──
     virtual LedManager& getLedManager() = 0;
+    virtual WaveManager& getWaveManager() = 0;
 };

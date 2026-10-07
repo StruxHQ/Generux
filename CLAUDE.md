@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Strux is a template/foundation for ESP32 firmware (ESP-IDF v6.0, C++, FreeRTOS) with a React web UI. It is meant to be copied and renamed into new projects, so keep the core generic — several downstream forks (e.g. the KC1245 Thermostat) backport improvements from and to this repo.
+Wavy is a square-wave generator: one pin, 50% duty, 5 Hz–100 kHz, set from the web UI (`WaveManager` in `main/app/`, `LedcSquareWave` in `main/hardware/drivers/`). It is a fork of **Strux**, a template/foundation for ESP32 firmware (ESP-IDF v6.0, C++, FreeRTOS) with a React web UI. The framework under `main/strux/` keeps the Strux names (`StruxContext`, `StruxProvider`, the `X-Strux-Token` relay header) on purpose, so improvements can be backported between this repo and the template — keep it generic, and put Wavy-specific code in `main/app/` and `main/hardware/`. "Strux" in the rest of this file means that framework.
 
 ## Build commands
 

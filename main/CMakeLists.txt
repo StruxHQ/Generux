@@ -38,6 +38,7 @@ set(STRUX_SOURCES
 # ── The application. This is the list a fork owns.
 set(APP_SOURCES
     "app/LedManager/LedManager.cpp"
+    "app/WaveManager/WaveManager.cpp"
 )
 
 set(SOURCE_FILES_LIST
@@ -72,6 +73,7 @@ set(INCLUDE_DIRS_LIST
     "hardware"
     "app"
     "app/LedManager"
+    "app/WaveManager"
 )
 
 set(COMPONENT_REQUIRES
@@ -87,6 +89,7 @@ set(COMPONENT_REQUIRES
     esp_partition
     spi_flash
     esp_driver_gpio
+    esp_driver_ledc
     mdns
     # Only to report the DFS bounds in `system info` — the scaling itself is
     # configured by startup code, see CONFIG_PM_ENABLE in sdkconfig.defaults.
