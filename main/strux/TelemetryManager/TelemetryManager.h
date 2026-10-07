@@ -3,7 +3,9 @@
 #include "StruxProvider.h"
 #include "InitState.h"
 #include "TypedSettings.h"
-#include "SessionProtocol.h"
+#include "ChannelProtocol.h"
+#include "CommandEntry.h"
+#include "Mutex.h"
 #include "Task.h"
 
 #include <cstddef>
@@ -26,8 +28,16 @@
 //     p.Field("humidity", 55);
 //     p.Commit();
 //
-// There is NO buffering yet: a point taken while the relay is down is gone. That is a
-// deliberate first cut — see docs/backlog for what buffering has to decide first.
+// A point is written to a small bounded ring and shipped by whichever Connection
+// is draining it. Nothing here touches a socket, and that is the point: this used
+// to call RelayManager::BroadcastTelemetry from whatever task took the
+// measurement, which meant an arbitrary task blocking on the relay's send mutex --
+// under ContextLock, whose failsafe reboots the device after three timeouts. A
+// producer writes to memory; the transport decides when to send.
+//
+// Explicitly lossy. The ring holds RING_SLOTS points and the oldest is overwritten
+// when it fills, so an outage costs the middle of a graph rather than the device's
+// memory.
 class TelemetryManager
 {
     static constexpr const char* TAG = "TelemetryManager";
@@ -103,7 +113,27 @@ public:
     uint32_t Sent() const { return sent_; }
     uint32_t Dropped() const { return dropped_; }
 
+    /// Pop buffered points into `out` as newline-separated lines, WHOLE lines
+    /// only, and report how many. Destructive, because telemetry has exactly one
+    /// consumer -- unlike the log ring, which several connections read through
+    /// cursors, so there is nothing here to keep a line for.
+    ///
+    /// Batching several points into one frame is this loop and nothing else: the
+    /// records are newline separated, which is what the relay already splits on,
+    /// so it costs no framing on the wire.
+    size_t Drain(char* out, size_t cap, uint32_t& lines);
+
+    /// What became of a batch. The transport knows; the ring does not.
+    void ReportSent(uint32_t n) { sent_ += n; }
+    void ReportDropped(uint32_t n) { dropped_ += n; }
+
 private:
+    // ── Commands (registered with CommandManager in Init) ──
+    CommandResult Cmd_Stats(CommandContext& ctx);
+
+    // Defined in TelemetryManager.cpp, beside the handler.
+    static CommandEntry statsCommand_;
+
     StruxProvider& strux_;
     InitState initState_;
     Task task_;
@@ -111,8 +141,23 @@ private:
     uint32_t sent_ = 0;
     uint32_t dropped_ = 0;
 
+    // Roughly half an hour at the default 60 s interval. Fixed slots rather than a
+    // byte ring: a vitals line is about 120 characters, so the waste is small and
+    // the code that would recover it is not.
+    static constexpr int    RING_SLOTS = 32;
+    static constexpr size_t SLOT_CAP   = 192;
+
+    char    ring_[RING_SLOTS][SLOT_CAP] = {};
+    uint8_t ringLen_[RING_SLOTS] = {};
+    int     ringHead_ = 0;
+    int     ringCount_ = 0;
+    Mutex   ringMutex_;
+
+    /// Buffer one formatted line, overwriting the oldest when full.
+    void Push(const char* line, size_t n);
+
     /// Appends `device=<id>` so every point says which board it came from without
-    /// each caller remembering to, then sends the line on the telemetry session.
+    /// each caller remembering to, then buffers the line.
     void Send(const char* measurement, const char* tags, const char* fields);
 
     void TaskLoop();
@@ -129,7 +174,14 @@ private:
     // Keys are `telem.` and not `telemetry.` because an NVS key is at most 15 chars,
     // and Register() asserts on that at RUNTIME — `telemetry.enabled` is 17 and boots
     // straight into a reset loop. Nothing catches it at compile time.
-    inline static BoolSetting enabled_{ "telem.enabled", "Telemetry Enabled", false };
+    //
+    // Read once, in Init(): the task is only started when this is true, so turning
+    // telemetry on takes a reboot. Deliberate — the alternative is a 3 KB task
+    // sleeping forever on every device that never enables telemetry, which is most of
+    // them. The label carries that, because a switch that appears to work and does
+    // nothing is worse than one that says what it costs.
+    inline static BoolSetting enabled_{ "telem.enabled",
+                                        "Telemetry Enabled (needs reboot)", false };
     inline static UInt32Setting intervalSec_{ "telem.interval",
                                              "Telemetry Interval (s)", 60 };
 };

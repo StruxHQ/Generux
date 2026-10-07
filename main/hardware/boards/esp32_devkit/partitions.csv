@@ -1,0 +1,24 @@
+# ESP-IDF Partition Table — ESP32 DevKit (ESP32-WROOM-32, 4 MB flash)
+#
+# This board's layout, not the project's. The application asks only for nvs,
+# otadata, phy_init and two app slots; how big they are is a property of this
+# flash, which is why the file lives here and the board's sdkconfig.defaults
+# names it.
+#
+# The C3 board's copy is byte-identical today. Do NOT consolidate them into one
+# shared file: both boards happen to have 4 MB, which is a coincidence of the
+# hardware rather than a shared fact, and a shared file would assert one board's
+# flash while another board is being built. See
+# docs/reasoning/2026-09-22-09h25-a-shared-default-that-asserts-a-hardware-fact-compares-one-board-against-another.md
+#
+# No www partition: the built frontend is packed into one blob and linked into
+# the app image (main/strux/WebAssets/), so a firmware image is the whole product
+# and the space the FAT image used is back in the two OTA slots. The slots fill
+# the 4 MB flash exactly.
+#
+# Name,     Type,   SubType,    Offset,     Size,       Flags
+nvs,        data,   nvs,        0x9000,     0x6000,
+otadata,    data,   ota,        0xf000,     0x2000,
+phy_init,   data,   phy,        0x11000,    0x1000,
+ota_0,      app,    ota_0,      0x20000,    0x1F0000,
+ota_1,      app,    ota_1,      0x210000,   0x1F0000,

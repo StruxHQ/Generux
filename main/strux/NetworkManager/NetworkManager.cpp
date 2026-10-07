@@ -15,6 +15,12 @@ NetworkManager::NetworkManager(StruxProvider& strux)
 {
 }
 
+CommandEntry NetworkManager::wifiScanCommand_{
+    "wifi scan", &InvokeCommand<&NetworkManager::Cmd_WifiScan>,
+    "Scan for WiFi networks in range and report each one's SSID and signal "
+    "strength. Takes a few seconds and briefly disturbs the connection."
+};
+
 void NetworkManager::Init()
 {
     auto initAttempt = initState.TryBeginInit();
@@ -79,7 +85,7 @@ void NetworkManager::Init()
     connectTimer_.Init("net_cycle", pdMS_TO_TICKS(StaConnectTimeoutMs), false);
     connectTimer_.SetHandler([this]() { OnCycleTimer(); });
 
-    strux_.getCommandManager().Register(this, commands_);
+    strux_.getCommandManager().Register(this, { &wifiScanCommand_ });
 
     initAttempt.SetReady();
     ESP_LOGI(TAG, "Initialized");
@@ -460,11 +466,9 @@ void NetworkManager::HandleNetworkEvent(const NetworkEvent& event)
 // WebSocket commands
 // ──────────────────────────────────────────────────────────────
 
-RequestError NetworkManager::Cmd_WifiScan(CommandContext& ctx)
+CommandResult NetworkManager::Cmd_WifiScan(CommandContext& ctx)
 {
     WiFiInterface::ScanResult results[20] = {};
-    RETURN_IF_ERROR(ctx.readArgs());
-
     int count = wifi().Scan(results, 20);
 
     auto root = ctx.reply.object();
@@ -478,6 +482,11 @@ RequestError NetworkManager::Cmd_WifiScan(CommandContext& ctx)
         n.field("rssi", static_cast<int32_t>(results[i].rssi));
         n.field("channel", static_cast<int32_t>(results[i].channel));
         n.field("secure", results[i].secure);
+        // "secure" is the padlock; "auth" is the answer to why a join was refused at
+        // full signal, which is the one question the bit cannot settle. A caller
+        // reaching this device over the relay cannot read the firmware log, so the
+        // name goes on the reply too.
+        n.field("auth", WiFiInterface::AuthModeName(results[i].authmode));
     }
-    return RequestError::Ok;
+    return CommandResult::Ok;
 }

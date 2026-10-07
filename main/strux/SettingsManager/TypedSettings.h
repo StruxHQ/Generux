@@ -22,8 +22,9 @@ struct Int32Setting : Setting
 {
     const int32_t def;
 
-    Int32Setting(const char* key, const char* label, int32_t def)
-        : Setting(key, label, SettingType::Int32), def(def) {}
+    Int32Setting(const char* key, const char* label, int32_t def,
+                  SettingFlags flags = SettingFlags::None)
+        : Setting(key, label, SettingType::Int32, flags), def(def) {}
 
     int32_t Get() const;
     bool Set(int32_t v);
@@ -36,8 +37,9 @@ struct UInt32Setting : Setting
 {
     const uint32_t def;
 
-    UInt32Setting(const char* key, const char* label, uint32_t def)
-        : Setting(key, label, SettingType::UInt32), def(def) {}
+    UInt32Setting(const char* key, const char* label, uint32_t def,
+                   SettingFlags flags = SettingFlags::None)
+        : Setting(key, label, SettingType::UInt32, flags), def(def) {}
 
     uint32_t Get() const;
     bool Set(uint32_t v);
@@ -50,8 +52,9 @@ struct FloatSetting : Setting
 {
     const float def;
 
-    FloatSetting(const char* key, const char* label, float def)
-        : Setting(key, label, SettingType::Float), def(def) {}
+    FloatSetting(const char* key, const char* label, float def,
+                  SettingFlags flags = SettingFlags::None)
+        : Setting(key, label, SettingType::Float, flags), def(def) {}
 
     // NVS has no float type — stored bit-cast through u32.
     float Get() const;
@@ -65,8 +68,9 @@ struct BoolSetting : Setting
 {
     const bool def;
 
-    BoolSetting(const char* key, const char* label, bool def)
-        : Setting(key, label, SettingType::Bool), def(def) {}
+    BoolSetting(const char* key, const char* label, bool def,
+                 SettingFlags flags = SettingFlags::None)
+        : Setting(key, label, SettingType::Bool, flags), def(def) {}
 
     // Stored as u8 (same as the previous settings system).
     bool Get() const;
@@ -80,8 +84,9 @@ struct StringSetting : Setting
 {
     const char* const def;   // must be a string literal (checked at Register)
 
-    StringSetting(const char* key, const char* label, const char* def)
-        : Setting(key, label, SettingType::String), def(def) {}
+    StringSetting(const char* key, const char* label, const char* def,
+                   SettingFlags flags = SettingFlags::None)
+        : Setting(key, label, SettingType::String, flags), def(def) {}
 
     /// Copies the NVS value into `out`, or the default when nothing is
     /// stored. Returns true if a stored value was found.

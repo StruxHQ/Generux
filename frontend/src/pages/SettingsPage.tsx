@@ -253,7 +253,7 @@ export default function SettingsPage() {
 
   function openJsonEditor() {
     const obj: Record<string, unknown> = {}
-    for (const s of settings) obj[s.key] = s.value
+    for (const s of settings) if (!s.hidden) obj[s.key] = s.value
     setJsonText(JSON.stringify(obj, null, 2))
     setJsonError("")
     setJsonOpen(true)
@@ -271,7 +271,7 @@ export default function SettingsPage() {
     }
   }
 
-  const groups = groupSettings(settings)
+  const groups = groupSettings(settings.filter((s) => !s.hidden))
 
   // Search and category compose: the chips narrow to one group, the search box
   // narrows within whatever is showing.
@@ -503,13 +503,6 @@ function GroupCard({
 
 // ── Setting row ──────────────────────────────────────────────
 
-const sensitiveKeys = ["password", "pass"]
-
-function isSensitive(key: string): boolean {
-  const field = key.split(".").pop() ?? ""
-  return sensitiveKeys.includes(field)
-}
-
 // Every control sits in this fixed-width well, so the right edge of a card is a
 // single line whatever the mix of switches, inputs and the SSID picker above it.
 // It is the widest thing a row can afford: the label beside it truncates, and a
@@ -524,7 +517,7 @@ function SettingRow({
   onChange: (value: string) => void
 }) {
   const isWifiSsid = setting.key === "wifi.ssid"
-  const isPassword = setting.type === "string" && isSensitive(setting.key)
+  const isPassword = setting.type === "string" && setting.secret === true
 
   return (
     <li className="flex items-center justify-between gap-3 px-3 py-1.5">
@@ -546,6 +539,7 @@ function SettingRow({
         ) : (
           <Input
             className="h-7 w-full text-[13px]"
+            autoComplete={isPassword ? "new-password" : undefined}
             type={isPassword ? "password" : NUMERIC_SETTING_TYPES.includes(setting.type) ? "number" : "text"}
             defaultValue={String(setting.value)}
             onBlur={(e) => {

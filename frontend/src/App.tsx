@@ -4,6 +4,7 @@ import { useRoute } from "@/hooks/use-route"
 import { useAuth } from "@/hooks/use-auth"
 import HomePage from "@/pages/HomePage"
 import ConsolePage from "@/pages/ConsolePage"
+import CommandsPage from "@/pages/CommandsPage"
 import SettingsPage from "@/pages/SettingsPage"
 import FirmwarePage from "@/pages/FirmwarePage"
 import LoginPage from "@/pages/LoginPage"
@@ -14,6 +15,8 @@ function PageContent({ page }: { page: Page }) {
       return <HomePage />
     case "console":
       return <ConsolePage />
+    case "commands":
+      return <CommandsPage />
     case "settings":
       return <SettingsPage />
     case "firmware":

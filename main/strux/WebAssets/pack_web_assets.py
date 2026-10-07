@@ -46,6 +46,10 @@ MAX_ENTRIES = 0xFFFF
 
 FLAG_GZIP = 1 << 0
 
+# Already-compressed payloads. Gzipping one costs the browser a decompress pass
+# and buys nothing (or loses, when the container grows).
+PRECOMPRESSED = {".woff2", ".woff", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".gz", ".zip"}
+
 PLACEHOLDER = (
     b"<!doctype html><html><body><h1>Frontend not built</h1>"
     b"<p>Install <a href=\"https://pnpm.io\">pnpm</a> and rebuild, or run: "
@@ -65,10 +69,18 @@ def collect(src: Path):
     return files
 
 
-def store(raw: bytes):
+def store(name: str, raw: bytes):
     """Compress only when it actually pays. Fonts, PNGs and other already-packed
     assets grow under gzip, and the per-file flag means the consumer never has to
-    guess which is which."""
+    guess which is which.
+
+    A size comparison alone is not enough: Inter's latin subset gzips 7 bytes
+    SMALLER than it started, so "smaller" stored it compressed and every browser
+    then paid a full decompress pass over 48 KB to save seven bytes. Formats that
+    carry their own compression are skipped by extension, and the comparison
+    stays for everything else."""
+    if Path(name).suffix.lower() in PRECOMPRESSED:
+        return raw, 0
     packed = gzip.compress(raw, 9, mtime=0)   # mtime=0: same input, same bytes
     if len(packed) < len(raw):
         return packed, FLAG_GZIP
@@ -86,7 +98,7 @@ def build(files):
         if len(encoded) > MAX_NAME:
             sys.exit(f"web_assets: name too long ({len(encoded)} > {MAX_NAME} bytes): {name}")
 
-        blob, flags = store(raw)
+        blob, flags = store(name, raw)
         digest = hashlib.sha256(blob).digest()[:8]
         entries.append(struct.pack(ENTRY_FORMAT, encoded, cursor, len(blob), flags, digest))
         payloads.append(blob)

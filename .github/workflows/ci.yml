@@ -1,0 +1,139 @@
+# Every commit, not just the ones somebody tags.
+#
+# release.yml already built both boards in an ESP-IDF v6.0 container and has done
+# so successfully for every release; what it could not do is tell you BEFORE the
+# release that the commit was broken. This is the same build, moved to where it
+# is useful, plus the two checks a release never made: the frontend's types, and
+# the pure headers under main/lib/.
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+  pull_request:
+  workflow_dispatch: {}
+
+# A second push to a PR supersedes the first. Nobody wants the result for a commit
+# that has already been replaced, and the firmware legs are the slow part. A push to
+# dev or main is NOT cancelled: any dev commit may be tagged as a release candidate,
+# and promoting it fast-forwards main, whose protection requires these checks to
+# have passed on that exact commit. (Grouped per commit there, because a group keeps
+# only one PENDING run and would silently drop the one in between.)
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IDF_VERSION: "v6.0"
+
+jobs:
+  # The only part of this project a PC can check. What qualifies is what names no
+  # layer -- the pure protocol headers -- and that is not an accident: it is the
+  # same test that decides something belongs in main/lib/ in the first place.
+  #
+  # Everything else needs a radio, a flash partition or a socket and stays
+  # verified by driving a real device over its own wire. That boundary is
+  # deliberate; this job is not a stub waiting to grow mocks of the device.
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Configure
+        run: cmake -S test -B build_test -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build
+        run: cmake --build build_test
+
+      - name: Run
+        run: ctest --test-dir build_test --output-on-failure
+
+  # `tsc -b --force`, because plain `tsc --noEmit` checks NOTHING here -- the root
+  # tsconfig has files: []. The build is separate from the typecheck on purpose:
+  # vite will happily emit a bundle from code tsc rejects.
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: frontend/package.json
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install
+        run: cd frontend && pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: cd frontend && pnpm typecheck
+
+      # The reply reader is the one place a mistake would make the answer depend
+      # on the transport's buffer size, so it is tested at every fragmentation
+      # from one byte up. See src/lib/reply.test.ts.
+      - name: Test
+        run: cd frontend && pnpm test
+
+      - name: Build
+        run: cd frontend && pnpm build
+
+  # One leg per board in main/hardware/boards/. set-target picks the chip and
+  # -DBOARD picks the pinout: a board cannot supply its own chip (see the note in
+  # main/CMakeLists.txt), so both halves are spelled out. Kept in step with the
+  # matrix in release.yml -- a board added to one belongs in the other.
+  firmware:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false          # a broken board should not hide the other one
+      matrix:
+        include:
+          - board: esp32_devkit
+            target: esp32
+          - board: esp32c3_supermini
+            target: esp32c3
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          # Not for the version here -- CI publishes nothing -- but because
+          # `git describe` failing is noisy and the fetch is cheap.
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: frontend/package.json
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      # The ESP-IDF container has no pnpm, so the CMake frontend target is
+      # skipped there and the image is made from what this step leaves in www/.
+      # Built here rather than taken from the frontend job so that a failure
+      # names the board it broke.
+      - name: Build frontend
+        run: cd frontend && pnpm install --frozen-lockfile && pnpm build
+
+      - name: Build firmware
+        uses: espressif/esp-idf-ci-action@v1.2.0
+        with:
+          esp_idf_version: ${{ env.IDF_VERSION }}
+          target: ${{ matrix.target }}
+          command: |
+            set -euo pipefail
+            # The container runs as root over a checkout owned by the runner, so
+            # git refuses the repo as "dubious ownership" and the version lookup
+            # swallows the failure.
+            git config --global --add safe.directory "$PWD"
+            idf.py -DBOARD=${{ matrix.board }} set-target ${{ matrix.target }}
+            idf.py -DBOARD=${{ matrix.board }} build

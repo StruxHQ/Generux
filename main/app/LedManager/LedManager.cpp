@@ -25,7 +25,7 @@ void LedManager::Init()
     // Strux was edited to make these two lines work.
     StruxProvider& strux = app_.getStrux();
     strux.getSettingsManager().Register({ &enabled_ });
-    strux.getCommandManager().Register(this, commands_);
+    strux.getCommandManager().Register(this, { &getCommand_, &setCommand_ });
 
     timer_.SetHandler([this] { OnTick(); });
     timer_.Init("led", pdMS_TO_TICKS(POLL_MS));
@@ -59,32 +59,48 @@ void LedManager::Apply()
 }
 
 // ──────────────────────────────────────────────────────────────
-// Commands. These appear in `help list` and work over the local WebSocket and the relay
+// Commands. These appear in `help` and work over the local WebSocket and the relay
 // alike, because a handler serves neither — it serves a CommandContext.
 // ──────────────────────────────────────────────────────────────
 
-RequestError LedManager::Cmd_Get(CommandContext& ctx)
-{
-    RETURN_IF_ERROR(ctx.readArgs());
+namespace {
 
+constexpr CommandArg<bool> enabledArg{
+    "enabled", "true lights the LED while the relay link is up; false keeps the "
+               "board dark. Absent leaves the current setting alone.",
+    Presence::Optional };
+
+} // namespace
+
+CommandEntry LedManager::getCommand_{
+    "led get", &InvokeCommand<&LedManager::Cmd_Get>,
+    "Report the indicator: whether it is enabled, whether the relay link is up, "
+    "and whether the LED is lit right now."
+};
+
+CommandEntry LedManager::setCommand_{
+    "led set", &InvokeCommand<&LedManager::Cmd_Set>,
+    "Turn the relay-link indicator on or off. Persisted, so it survives a "
+    "reboot. Omitting 'enabled' leaves it as it is and just reports the state.",
+    { &enabledArg }
+};
+
+CommandResult LedManager::Cmd_Get(CommandContext& ctx)
+{
     auto resp = ctx.reply.object();
     resp.field("enabled", enabled_.Get());
     resp.field("connected", app_.getStrux().getRelayManager().IsConnected());
     resp.field("on", app_.getBoard().GetLed().IsOn());
-    return RequestError::Ok;
+    return CommandResult::Ok;
 }
 
-RequestError LedManager::Cmd_Set(CommandContext& ctx)
+CommandResult LedManager::Cmd_Set(CommandContext& ctx)
 {
-    // "Absent means leave it alone" needs no has() here: the destination starts at the
-    // current state, so an Optional the caller omitted simply writes itself back.
-    bool enabled = enabled_.Get();
-
-    RETURN_IF_ERROR(ctx.readArgs(
-        Optional("enabled", enabled,
-                 "true lights the LED while the relay link is up; false keeps the "
-                 "board dark. Absent leaves the current setting alone.")
-    ));
+    // "Absent means leave it alone" is the one place has() earns itself: an omitted
+    // optional bool decodes as false, which would turn the indicator OFF rather than
+    // leave it. The destination no longer belongs to the handler, so the fallback has
+    // to be written rather than left standing in an initialiser.
+    const bool enabled = ctx.has(enabledArg) ? ctx.arg(enabledArg) : enabled_.Get();
 
     SetEnabled(enabled);
 
@@ -100,5 +116,5 @@ RequestError LedManager::Cmd_Set(CommandContext& ctx)
     resp.field("enabled", enabled_.Get());
     resp.field("connected", app_.getStrux().getRelayManager().IsConnected());
     resp.field("on", app_.getBoard().GetLed().IsOn());
-    return RequestError::Ok;
+    return CommandResult::Ok;
 }

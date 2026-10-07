@@ -52,7 +52,7 @@ public:
     /// `extraHeaders` is raw `Key: Value\r\n` lines added to the upgrade request, or
     /// nullptr. It is NOT copied — the caller keeps it alive, because a reconnect
     /// re-sends it. This is how the relay presents its token: a header goes up with
-    /// the handshake, so the server can refuse the upgrade outright and the session
+    /// the handshake, so the server can refuse the upgrade outright and the channel
     /// protocol above learns nothing about authentication.
     ConnectResult Connect(const char* uri, int timeoutMs, const char* extraHeaders = nullptr);
     void Close();
@@ -63,11 +63,17 @@ public:
     /// never got an HTTP response at all. Only meaningful next to `Refused`.
     int LastHttpStatus() const { return httpStatus_; }
 
+    /// A message longer than `buf`: read to its end and discarded, so the PIPE IS
+    /// STILL IN SYNC and every other channel on it is unharmed. Distinct from -1
+    /// because the two want opposite responses -- reconnect, versus refuse one
+    /// channel and carry on. It used to be -1, which let one oversized message
+    /// from the relay drop the whole connection.
+    static constexpr int READ_TOO_LONG = -2;
+
     /// The next data message, whole, into `buf`. Returns its length; 0 when nothing
-    /// arrived within `timeoutMs`; -1 when the link is dead and wants reconnecting.
-    /// Fragmented messages are stitched together — a message too large for `buf` is
-    /// a misconfigured peer, so it closes the link rather than silently dropping a
-    /// chunk out of somebody's firmware image.
+    /// arrived within `timeoutMs`; -1 when the link is dead and wants reconnecting;
+    /// READ_TOO_LONG when it did not fit (see above). Fragmented messages are
+    /// stitched together, so a WS frame boundary is never a channel chunk boundary.
     ///
     /// `timeoutMs` bounds the wait for a message to START. Once one has started,
     /// STALL_TIMEOUT_MS bounds how long it may make no progress — so a caller free to
@@ -75,7 +81,7 @@ public:
     /// notice a pipe that died halfway through a chunk.
     int ReadFrame(uint8_t* buf, size_t cap, int timeoutMs);
 
-    /// One binary frame. Safe from any task: a session's reply and a log broadcast
+    /// One binary frame. Safe from any task: a channel's reply and a log broadcast
     /// come from different ones, and a frame must not be split down the middle.
     bool SendBinary(const uint8_t* data, size_t len, int timeoutMs);
 

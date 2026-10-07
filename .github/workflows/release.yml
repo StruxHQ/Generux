@@ -1,5 +1,11 @@
 name: Release (ESP-IDF)
 
+# Two kinds of tag, both pushed only by "Release tag" (release-tag.yml):
+#   v1.2.0-rc.N  BUILD the firmware (it reports 1.2.0) and publish a pre-release.
+#   v1.2.0       BUILD NOTHING: publish the exact .bin files of the RC on the same
+#                commit, so the binary tested on acceptation is byte-for-byte the
+#                binary released. The SHA-256 of every file is in both releases' notes.
+
 on:
   push:
     tags:
@@ -18,6 +24,8 @@ jobs:
   # -DBOARD picks the pinout: a board cannot supply its own chip (see the note
   # in main/CMakeLists.txt), so both halves are spelled out here.
   build:
+    # A final tag (no "-") ships its RC's binaries and builds nothing.
+    if: "!startsWith(github.ref, 'refs/tags/v') || contains(github.ref_name, '-')"
     runs-on: ubuntu-latest
 
     strategy:
@@ -38,6 +46,12 @@ jobs:
           # CMakeLists. A shallow checkout has no tags, and the fallback is
           # silent: the release would be built as 0.0.0-dev.
           fetch-depth: 0
+
+      # A final release sits on the same commit as its last RC, and `git describe`
+      # would pick either tag. Only the tag being built may be visible to it.
+      - name: Hide other tags on this commit
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: git tag --points-at HEAD | grep -vx "$GITHUB_REF_NAME" | xargs -r git tag -d
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -84,6 +98,7 @@ jobs:
           set -euo pipefail
           built=$(python3 -c "import json; print(json.load(open('build/project_description.json'))['project_version'])")
           tag="${GITHUB_REF_NAME#v}"
+          tag="${tag%-rc.*}"   # an RC builds as the version it is a candidate for
           echo "built $built, tagged $tag"
           if [ "$built" != "$tag" ]; then
             echo "::error::firmware reports version '$built' but the tag is '$tag'"
@@ -107,25 +122,99 @@ jobs:
 
   release:
     needs: build
+    # Runs when build succeeded (an RC) or was skipped (a final release).
+    if: "!cancelled() && (needs.build.result == 'success' || needs.build.result == 'skipped')"
     runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.ref_name }}
+      # v1.2.0-rc.1 is a release candidate (a GitHub pre-release); v1.2.0 is final.
+      PRERELEASE: ${{ contains(github.ref_name, '-') }}
     steps:
+      - name: Checkout
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
       - name: Download build artifacts
+        if: needs.build.result == 'success'
         uses: actions/download-artifact@v8
         with:
           path: dist
           pattern: firmware-*
           merge-multiple: true
 
+      # Final release: the files come from the RC release on the same commit, and the
+      # set must be complete -- two files per board folder. Fails closed.
+      - name: Take the RC's firmware unchanged
+        if: needs.build.result == 'skipped' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          rc=$(git tag --points-at "$TAG^{commit}" | grep -E -- '-rc\.[0-9]+$' | sort -V | tail -n1)
+          [ -n "$rc" ] || { echo "::error::No release candidate on this commit; a final release ships an RC's binaries"; exit 1; }
+          bash .github/agent/release-assets.sh "$rc"
+          gh release download "$rc" --repo "$GITHUB_REPOSITORY" --dir dist --pattern '*.bin'
+          echo "FROM_RC=$rc" >> "$GITHUB_ENV"
+
+      # The issues this tag ships, by ancestry of their agent PR's merge commit.
+      - name: List the included issues
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.AGENT_PAT }}
+        run: |
+          bash .github/agent/release-issues.sh "$TAG" > /tmp/issues.txt
+          {
+            [ "$PRERELEASE" = true ] && kind="release candidate" || kind=release
+            echo "### Issues in this $kind"
+            echo
+            [ -s /tmp/issues.txt ] || echo "None from the issue pipeline."
+            while read -r issue pr; do echo "- #$issue (PR #$pr)"; done < /tmp/issues.txt
+            echo
+            echo "Commit \`$(git rev-parse --short "$TAG^{commit}")\`; a device running this build reports that commit."
+            echo
+            if [ -n "${FROM_RC:-}" ]; then
+              echo "### Firmware: byte-for-byte the files of [$FROM_RC]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$FROM_RC)"
+            else
+              echo "### Firmware checksums"
+            fi
+            echo; echo '```'; (cd dist && sha256sum *.bin); echo '```'
+          } > /tmp/issues.md
+          cat /tmp/issues.md
+          { cat /tmp/issues.md; echo; sed "s/@PROJECT@/$PROJECT_NAME/g" <<'FW'
+          ### Firmware files
+
+          One set per board: `esp32_devkit` (ESP32-WROOM-32) and `esp32c3_supermini` (ESP32-C3).
+
+          - **`@PROJECT@-<board>-factory.bin`** — full image (bootloader + partition table + app, the web UI linked into it). For a first flash or a recovery, from offset zero: `esptool write-flash 0x0 <file>`.
+          - **`@PROJECT@-<board>-app.bin`** — application only. Upload it to the inactive `ota_0`/`ota_1` partition from the device's Firmware page.
+          FW
+          } > /tmp/release-body.md
+
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v3
         with:
+          prerelease: ${{ env.PRERELEASE == 'true' }}
           generate_release_notes: true
-          body: |
-            ### Firmware files
-
-            One set per board: `esp32_devkit` (ESP32-WROOM-32) and `esp32c3_supermini` (ESP32-C3).
-
-            - **`${{ env.PROJECT_NAME }}-<board>-factory.bin`** — full image (bootloader + partition table + app, the web UI linked into it). For a first flash or a recovery, from offset zero: `esptool write-flash 0x0 <file>`.
-            - **`${{ env.PROJECT_NAME }}-<board>-app.bin`** — application only. Upload it to the inactive `ota_0`/`ota_1` partition from the device's Firmware page.
+          body_path: /tmp/release-body.md
           files: dist/*.bin
+
+      # Final release: Ready for release -> Released, and the issue closes. An RC only
+      # notes which candidate carries it; the issue stays open until a final ships.
+      - name: Move the included issues
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.AGENT_PAT }}
+        run: |
+          url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG"
+          while read -r issue pr; do
+            if [ "$PRERELEASE" = true ]; then
+              gh issue comment "$issue" --repo "$GITHUB_REPOSITORY" --body "Included in release candidate [$TAG]($url)."
+            else
+              gh issue edit "$issue" --repo "$GITHUB_REPOSITORY" --add-label stage:released --remove-label stage:ready-for-release
+              gh issue close "$issue" --repo "$GITHUB_REPOSITORY" --reason completed --comment "Released in [$TAG]($url)."
+            fi
+          done < /tmp/issues.txt

@@ -1,5 +1,24 @@
 @import "tailwindcss";
 @import "shadcn/tailwind.css";
+@import "tw-animate-css";
+
+/* Inter, LATIN SUBSET ONLY, and deliberately not the package's own stylesheet.
+   `@import "@fontsource-variable/inter"` pulls seven unicode-range-gated subsets,
+   218 KB of woff2 -- and every byte of it is linked into the APP IMAGE here
+   (main/strux/WebAssets/), not a data partition, so it is OTA slot this product
+   cannot spend on firmware. A browser rendering this UI's English strings requests
+   only latin (48 KB); the other 170 KB could never be served. The face below is
+   the package's own latin @font-face with the file resolved out of it, so the
+   typeface is the preset's -- what is dropped is coverage nothing asks for.
+   A fork that ships non-Latin text imports the package whole instead. */
+@font-face {
+  font-family: 'Inter Variable';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url("@fontsource-variable/inter/files/inter-latin-wght-normal.woff2") format('woff2-variations');
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
 
 /* The design-token contract. Every colour a shadcn component names is defined here,
    in both themes, and republished into Tailwind's theme below — a token referenced
@@ -41,6 +60,11 @@
     --sidebar-border: oklch(0.922 0 0);
     --sidebar-ring: oklch(0.708 0 0);
     --radius: 0.625rem;
+    --chart-1: oklch(0.87 0 0);
+    --chart-2: oklch(0.556 0 0);
+    --chart-3: oklch(0.439 0 0);
+    --chart-4: oklch(0.371 0 0);
+    --chart-5: oklch(0.269 0 0);
 }
 
 .dark {
@@ -66,17 +90,22 @@
     --destructive-foreground: oklch(0.985 0 0);
     --sidebar: oklch(0.205 0 0);
     --sidebar-foreground: oklch(0.985 0 0);
-    --sidebar-primary: oklch(0.922 0 0);
-    --sidebar-primary-foreground: oklch(0.205 0 0);
+    --sidebar-primary: oklch(0.488 0.243 264.376);
+    --sidebar-primary-foreground: oklch(0.985 0 0);
     --sidebar-accent: oklch(0.269 0 0);
     --sidebar-accent-foreground: oklch(0.985 0 0);
     --sidebar-border: oklch(1 0 0 / 10%);
     --sidebar-ring: oklch(0.556 0 0);
     --ring: oklch(0.556 0 0);
+    --chart-1: oklch(0.87 0 0);
+    --chart-2: oklch(0.556 0 0);
+    --chart-3: oklch(0.439 0 0);
+    --chart-4: oklch(0.371 0 0);
+    --chart-5: oklch(0.269 0 0);
 }
 
 @theme inline {
-    --font-sans: system-ui, sans-serif;
+    --font-sans: 'Inter Variable', sans-serif;
     --color-background: var(--background);
     --color-foreground: var(--foreground);
     --color-card: var(--card);
@@ -109,6 +138,16 @@
     --radius-sm: calc(var(--radius) * 0.6);
     --radius-md: calc(var(--radius) * 0.8);
     --radius-lg: var(--radius);
+    --font-heading: var(--font-sans);
+    --color-chart-5: var(--chart-5);
+    --color-chart-4: var(--chart-4);
+    --color-chart-3: var(--chart-3);
+    --color-chart-2: var(--chart-2);
+    --color-chart-1: var(--chart-1);
+    --radius-xl: calc(var(--radius) * 1.4);
+    --radius-2xl: calc(var(--radius) * 1.8);
+    --radius-3xl: calc(var(--radius) * 2.2);
+    --radius-4xl: calc(var(--radius) * 2.6);
 }
 
 @layer base {
@@ -118,4 +157,7 @@
   body {
     @apply bg-background text-foreground;
   }
+  html {
+    @apply font-sans;
+    }
 }

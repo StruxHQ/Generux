@@ -1,5 +1,6 @@
 #include "TelemetryManager.h"
 #include "SettingsManager.h"
+#include "CommandManager.h"
 #include "RelayManager.h"
 #include "NetworkManager.h"
 #include "DateTime.h"
@@ -18,6 +19,10 @@ TelemetryManager::TelemetryManager(StruxProvider& strux)
 {
 }
 
+CommandEntry TelemetryManager::statsCommand_{
+    "telemetry stats", &InvokeCommand<&TelemetryManager::Cmd_Stats>
+};
+
 void TelemetryManager::Init()
 {
     auto initAttempt = initState_.TryBeginInit();
@@ -28,6 +33,12 @@ void TelemetryManager::Init()
     }
 
     strux_.getSettingsManager().Register({ &enabled_, &intervalSec_ });
+
+    // Before the disabled early-return, deliberately: `telemetry stats` answering
+    // "enabled: false" is the whole point of asking it on a device whose graph is
+    // empty. A command that disappears when the thing it reports on is off cannot
+    // report that it is off.
+    strux_.getCommandManager().Register(this, { &statsCommand_ });
 
     if (!enabled_.Get())
     {
@@ -79,6 +90,25 @@ void TelemetryManager::SampleVitals()
         p.Field("rssi", static_cast<int32_t>(rssi));
 
     p.Commit();
+}
+
+// ──────────────────────────────────────────────────────────────
+// Commands
+// ──────────────────────────────────────────────────────────────
+
+// Why this exists: an empty graph has two causes that look identical from Influx —
+// the device never formatted a point, or it formatted them all and could not send
+// one. The counters already separate those; nothing read them. `relayConnected` is
+// here because it is the reason `dropped` climbs in practice.
+CommandResult TelemetryManager::Cmd_Stats(CommandContext& ctx)
+{
+    auto resp = ctx.reply.object();
+    resp.field("enabled", enabled_.Get());
+    resp.field("intervalSec", intervalSec_.Get());
+    resp.field("sent", sent_);
+    resp.field("dropped", dropped_);
+    resp.field("relayConnected", strux_.getRelayManager().IsConnected());
+    return CommandResult::Ok;
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -239,39 +269,31 @@ void TelemetryManager::Send(const char* measurement, const char* tags,
 {
     if (!enabled_.Get()) return;
 
-    auto& relay = strux_.getRelayManager();
-    if (!relay.IsConnected())
+    char line[LINE_CAP] = {};
+
+    // `device=<id>` first, so every point is attributable without each caller
+    // remembering to tag it. The relay does not verify this, which is fine while
+    // every device is one we installed.
+    const char* deviceId = strux_.getRelayManager().GetDeviceId();
+
+    // A timestamp only when the clock is actually set. Unsynced, the device would
+    // stamp everything 1970 and the points would land outside the retention window;
+    // omitting the field lets Influx use arrival time.
+    //
+    // Which is exactly the assumption buffering breaks, and the reason a point
+    // taken before NTP syncs still cannot be buffered: flush a hundred of them at
+    // once and they would all land at the flush instant. Unstamped points are
+    // therefore dropped here rather than queued.
+    DateTime now = DateTime::Now();
+    if (now.YearLocal() < 2020)
     {
-        // No buffer yet, so this point is gone. Counted rather than logged: a
-        // disconnected relay would otherwise produce a log line per measurement.
         dropped_++;
         return;
     }
 
-    char line[LINE_CAP] = {};
-
-    // `device=<id>` first, so every point is attributable without each caller
-    // remembering to tag it. The relay does not verify this, which is fine while every
-    // device is one we installed — noted in the backlog.
-    const char* deviceId = relay.GetDeviceId();
-
-    // A timestamp only when the clock is actually set. Unsynced, the device would
-    // stamp everything 1970 and the points would land outside the retention window;
-    // omitting the field lets Influx use arrival time, which without buffering is
-    // within a second of the truth anyway.
-    DateTime now = DateTime::Now();
-    int n;
-    if (now.YearLocal() >= 2020)
-    {
-        n = snprintf(line, sizeof(line), "%s,device=%s%s %s %lld000000000",
-                     measurement, deviceId, tags, fields,
-                     static_cast<long long>(now.UtcSeconds()));
-    }
-    else
-    {
-        n = snprintf(line, sizeof(line), "%s,device=%s%s %s",
-                     measurement, deviceId, tags, fields);
-    }
+    const int n = snprintf(line, sizeof(line), "%s,device=%s%s %s %lld000000000",
+                           measurement, deviceId, tags, fields,
+                           static_cast<long long>(now.UtcSeconds()));
 
     if (n < 0 || static_cast<size_t>(n) >= sizeof(line))
     {
@@ -280,8 +302,51 @@ void TelemetryManager::Send(const char* measurement, const char* tags,
         return;
     }
 
-    if (relay.BroadcastTelemetry(line, n))
-        sent_++;
-    else
+    Push(line, static_cast<size_t>(n));
+}
+
+void TelemetryManager::Push(const char* line, size_t n)
+{
+    if (n >= SLOT_CAP)
+    {
+        ESP_LOGW(TAG, "point too long for the ring (%u) - dropped",
+                 static_cast<unsigned>(n));
         dropped_++;
+        return;
+    }
+
+    LOCK(ringMutex_);
+    memcpy(ring_[ringHead_], line, n);
+    ringLen_[ringHead_] = static_cast<uint8_t>(n);
+    ringHead_ = (ringHead_ + 1) % RING_SLOTS;
+
+    if (ringCount_ < RING_SLOTS)
+        ringCount_++;
+    else
+        dropped_++;   // the oldest point was just overwritten
+}
+
+size_t TelemetryManager::Drain(char* out, size_t cap, uint32_t& lines)
+{
+    lines = 0;
+    size_t used = 0;
+
+    LOCK(ringMutex_);
+    while (ringCount_ > 0)
+    {
+        const int slot = (ringHead_ - ringCount_ + RING_SLOTS * 2) % RING_SLOTS;
+        const size_t n = ringLen_[slot];
+
+        // Whole lines only. A record split across two frames would make the
+        // receiver reassemble, which is the one thing batching must not cost.
+        if (used + n + 1 > cap) break;
+
+        memcpy(out + used, ring_[slot], n);
+        used += n;
+        out[used++] = '\n';
+        ringCount_--;
+        lines++;
+    }
+
+    return used;
 }

@@ -201,17 +201,14 @@ private:
     void StartProvisioningAp();
 
     // ── WebSocket commands (registered with CommandManager in Init) ──
-    RequestError Cmd_WifiScan(CommandContext& ctx);
+    CommandResult Cmd_WifiScan(CommandContext& ctx);
 
-    inline static CommandEntry commands_[] = {
-        { "wifi", "scan", &InvokeCommand<&NetworkManager::Cmd_WifiScan>,
-          "Scan for WiFi networks in range and report each one's SSID and signal "
-          "strength. Takes a few seconds and briefly disturbs the connection." },
-    };
+    // Defined in NetworkManager.cpp, beside the handler.
+    static CommandEntry wifiScanCommand_;
 
     // ── Settings (registered with SettingsManager in Init) ──
     inline static StringSetting wifiSsid_    { "wifi.ssid",     "WiFi SSID",     "" };
-    inline static StringSetting wifiPassword_{ "wifi.password", "WiFi Password", "" };
+    inline static StringSetting wifiPassword_{ "wifi.password", "WiFi Password", "", SettingFlags::Secret };
 
     // On, because <name>.local is how you find a device whose address you were never
     // told, and answering the occasional multicast query costs a radio that never

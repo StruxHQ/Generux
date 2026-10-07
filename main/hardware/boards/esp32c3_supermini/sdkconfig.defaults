@@ -2,6 +2,11 @@
 # Board overlay: ESP32-C3 SuperMini. Overlays the root sdkconfig.defaults
 # and wins on conflicts (composed in the root CMakeLists.txt).
 #
+# This file is what makes the board a complete platform rather than a pinout:
+# the root defaults hold what the APPLICATION needs and assert nothing about
+# hardware, so the flash and the partition table below are this board's to
+# state, not values it inherits.
+#
 # The chip itself is NOT set here. IDF resolves IDF_TARGET in the same early
 # pass that cannot see -DBOARD (the note in main/CMakeLists.txt), so a
 # CONFIG_IDF_TARGET line in this file is read too late and silently loses to
@@ -19,6 +24,17 @@
 CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y
 
-# Flash is 4 MB (as in the root defaults) but wired for DIO on these boards,
-# and the C3's SPI flash tops out at 80 MHz — same speed, safer mode.
+# ── Flash ──────────────────────────────────────────────────────
+# 4 MB, wired for DIO on these boards, and the C3's SPI flash tops out at
+# 80 MHz — same speed as the DevKit, safer mode.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
 CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+
+# ── Partition table ────────────────────────────────────────────
+# This board's own, sized to the 4 MB above. It happens to be identical to the
+# DevKit's, because both boards carry 4 MB — a coincidence of the hardware, not
+# a shared file. The path is relative to the project root, and the file sits
+# beside this one so a board is one folder.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="main/hardware/boards/esp32c3_supermini/partitions.csv"

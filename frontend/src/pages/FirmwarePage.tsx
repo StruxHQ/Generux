@@ -1,7 +1,14 @@
 import { useEffect, useRef, useState } from "react"
-import { backend, type Partition, type UpdateStatus } from "@/lib/backend"
+import { backend, UploadCancelled, type Partition, type UpdateStatus } from "@/lib/backend"
 import { useConnectionStatus } from "@/hooks/use-connection-status"
-import { UploadIcon, DownloadIcon, RefreshCwIcon } from "lucide-react"
+import {
+  UploadIcon,
+  DownloadIcon,
+  RefreshCwIcon,
+  PowerIcon,
+  PlayIcon,
+  XIcon,
+} from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { toast } from "sonner"
@@ -23,6 +30,7 @@ export default function FirmwarePage() {
   const [status, setStatus] = useState<UpdateStatus | null>(null)
   const [loadFailed, setLoadFailed] = useState(false)
   const [restartPending, setRestartPending] = useState(false)
+  const [restarting, setRestarting] = useState(false)
 
   function refresh() {
     // Two commands, and the status one is allowed to fail quietly: which slot is
@@ -44,7 +52,32 @@ export default function FirmwarePage() {
 
   return (
     <div className="mx-auto max-w-2xl space-y-6">
-      <h1 className="text-2xl font-bold">Firmware</h1>
+      <div className="flex items-center justify-between gap-4">
+        <h1 className="text-2xl font-bold">Firmware</h1>
+        {/* A plain restart, which deliberately does NOT change which image boots:
+            the device comes back into whatever it is running now. Switching slots
+            is "Boot this" on a row, and nothing else. */}
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={connection !== "connected" || restarting}
+          onClick={async () => {
+            if (!window.confirm("Restart the device? It will come back into the same firmware it is running now.")) return
+            setRestarting(true)
+            try {
+              await backend.reboot()
+              toast.success("Restarting", { description: "The device will reconnect on its own." })
+            } catch (e) {
+              toast.error("Restart failed", { description: errorMessage(e) })
+            } finally {
+              setRestarting(false)
+            }
+          }}
+        >
+          <PowerIcon className="mr-1.5 size-3.5" />
+          Restart
+        </Button>
+      </div>
 
       {status && (
         <div className="grid grid-cols-3 gap-3 rounded-xl border bg-card p-4 text-sm shadow-sm">
@@ -56,7 +89,8 @@ export default function FirmwarePage() {
 
       {restartPending && (
         <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-4 text-sm text-amber-600 dark:text-amber-400">
-          Upload complete — reboot the device to apply the update.
+          Upload complete. It is not running yet — an upload only writes the image.
+          Use <span className="font-medium">Boot this</span> on that slot to start it.
         </div>
       )}
 
@@ -64,7 +98,8 @@ export default function FirmwarePage() {
         <div className="border-b p-4">
           <h2 className="text-lg font-semibold">Partitions</h2>
           <p className="mt-0.5 text-xs text-muted-foreground">
-            Upload targets non-running OTA slots. Download is always available.
+            Upload targets non-running OTA slots and only writes bytes — it never
+            changes what boots. Download is always available.
           </p>
         </div>
 
@@ -78,6 +113,7 @@ export default function FirmwarePage() {
                   setRestartPending(true)
                   refresh()
                 }}
+                onAfterActivate={refresh}
               />
             ))}
           </ul>
@@ -125,31 +161,63 @@ function StatusField({ label, value }: { label: string; value?: string }) {
 function PartitionRow({
   partition,
   onAfterUpload,
+  onAfterActivate,
 }: {
   partition: Partition
   onAfterUpload: () => void
+  onAfterActivate: () => void
 }) {
   const p = partition
   const fileRef = useRef<HTMLInputElement>(null)
   const [progress, setProgress] = useState<number | null>(null)
   const [downProgress, setDownProgress] = useState<number | null>(null)
+  const [booting, setBooting] = useState(false)
+  const abortRef = useRef<AbortController | null>(null)
 
   const canUpload = p.uploadable && !p.running
   const uploading = progress !== null
+  // Only an app slot that is not already running can be booted into.
+  const canBoot = p.type === "app" && !p.running && !uploading
 
   async function onFileChosen(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     e.target.value = ""
     if (!file || !canUpload) return
 
+    const controller = new AbortController()
+    abortRef.current = controller
     setProgress(0)
     try {
-      await backend.uploadPartition(p.label, file, setProgress)
+      await backend.uploadPartition(p.label, file, setProgress, controller.signal)
       onAfterUpload()
     } catch (err) {
-      toast.error(`Upload to ${p.label} failed`, { description: errorMessage(err) })
+      // A cancel is not a failure and is not reported as one.
+      if (err instanceof UploadCancelled) {
+        toast.info(`Upload to ${p.label} cancelled`, {
+          description: "The slot is partly written. Nothing boots from it until you say so.",
+        })
+      } else {
+        toast.error(`Upload to ${p.label} failed`, { description: errorMessage(err) })
+      }
     } finally {
+      abortRef.current = null
       setProgress(null)
+    }
+  }
+
+  async function bootInto() {
+    if (!window.confirm(`Restart into ${p.label}? The device reboots immediately.`)) return
+    setBooting(true)
+    try {
+      await backend.activatePartition(p.label, true)
+      toast.success(`Restarting into ${p.label}`, {
+        description: "The device will reconnect on its own.",
+      })
+      onAfterActivate()
+    } catch (e) {
+      toast.error(`Could not boot ${p.label}`, { description: errorMessage(e) })
+    } finally {
+      setBooting(false)
     }
   }
 
@@ -197,6 +265,22 @@ function PartitionRow({
           <Button
             variant="outline"
             size="sm"
+            disabled={!canBoot || booting}
+            onClick={bootInto}
+            title={
+              p.running
+                ? "This slot is already running"
+                : p.type !== "app"
+                  ? "Only an app partition can be booted"
+                  : "Make this slot the one that boots, and restart into it now"
+            }
+          >
+            <PlayIcon className="mr-1.5 size-3.5" />
+            Boot this
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
             disabled={downProgress !== null}
             onClick={() => {
               setDownProgress(0)
@@ -214,9 +298,20 @@ function PartitionRow({
 
       {uploading && (
         <div className="mt-3">
-          <div className="mb-1 flex justify-between text-xs text-muted-foreground">
+          <div className="mb-1 flex items-center justify-between gap-3 text-xs text-muted-foreground">
             <span>Uploading…</span>
-            <span>{progress}%</span>
+            <div className="flex items-center gap-2">
+              <span>{progress}%</span>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 px-2 text-xs"
+                onClick={() => abortRef.current?.abort()}
+              >
+                <XIcon className="mr-1 size-3" />
+                Cancel
+              </Button>
+            </div>
           </div>
           <div className="h-1.5 overflow-hidden rounded-full bg-muted">
             <div

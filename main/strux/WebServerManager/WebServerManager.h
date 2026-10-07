@@ -4,10 +4,9 @@
 #include "StruxProvider.h"
 #include "InitState.h"
 #include "CommandEntry.h"
-#include "TypedSettings.h"
 #include "StaticFileHandler.h"
 #include "WebSocketHandler.h"
-#include "Authenticator.h"
+#include "Task.h"
 
 class Stream;
 
@@ -24,15 +23,17 @@ public:
 
     void Init();
 
-    void Broadcast(const char* json, int len);
-    void BroadcastBinary(const uint8_t* data, size_t len);
-
-    /// The credential authority, shared with any other transport that carries the
-    /// auth handshake (the relay pipe). Owned here because HTTP/WS auth started
-    /// here; it is transport-neutral.
-    Authenticator& GetAuthenticator() { return auth_; }
-
 private:
+    /// How often the pump looks for new log lines. The LAN transport is purely
+    /// reactive -- esp_http_server calls into it only when a frame arrives -- so
+    /// unlike the relay, which drains inside its own read loop, this side needs
+    /// something to do the walking. Short enough that a console feels live,
+    /// long enough that an idle device is not waking ten times a second.
+    static constexpr int PUMP_INTERVAL_MS = 100;
+
+    Task consolePump_;
+    void ConsolePumpLoop();
+
     StruxProvider& strux_;
 
     InitState initState;
@@ -41,14 +42,10 @@ private:
     StaticFileHandler staticFileHandler_;
     WebSocketHandler wsHandler_;
 
-    // ── Settings (registered with SettingsManager in Init) ──
-    // Empty means no login is required at all.
-    inline static StringSetting webPassword_{ "web.password", "Web Password", "" };
-
-    // Credential authority (owned here; used by the WS auth gate). No HTTP auth
-    // surface remains — the WebSocket carries all device interaction. Reads
-    // webPassword_ live by reference — see Authenticator.h.
-    Authenticator auth_{ webPassword_ };
+    // No settings and no credentials of its own: the password, the Authenticator
+    // and the `auth` commands are AuthManager's, and this manager borrows the
+    // authority through the provider like any other peer. No HTTP auth surface
+    // remains either — the WebSocket carries all device interaction.
 
     void StartServer();
     void RegisterRoutes();
@@ -61,40 +58,8 @@ private:
     // Reply is a header line then the raw bytes:
     //
     //   {"ok":true,"status":200,"contentType":"...","contentEncoding":"gzip"}\n<bytes>
-    RequestError Cmd_GetWebFile(CommandContext& ctx);
+    CommandResult Cmd_GetWebFile(CommandContext& ctx);
 
-    // ── auth: the handshake, as ordinary commands ──
-    //
-    // These live here because this manager owns the Authenticator and declares
-    // web.password. They are the only commands a connection may run before
-    // authenticating (AuthGate whitelists the category), and the only ones that touch
-    // ctx.connection.
-
-    /// Does this device want a password at all? Answered before login, so a client
-    /// knows whether to prompt.
-    RequestError Cmd_AuthHello(CommandContext& ctx);
-
-    /// Password in, session key out. The key lets a reconnect resume without
-    /// re-prompting.
-    RequestError Cmd_AuthLogin(CommandContext& ctx);
-
-    /// Resume with a key minted earlier.
-    RequestError Cmd_AuthResume(CommandContext& ctx);
-
-    inline static CommandEntry commands_[] = {
-        { "web",  "read",   &InvokeCommand<&WebServerManager::Cmd_GetWebFile>,
-          "Read one file of the device's own web UI. The reply is a JSON header "
-          "line (status, content type, encoding), a newline, then the raw bytes - "
-          "which may be gzipped. It serves the device's browser page; it is not a "
-          "general filesystem." },
-        { "auth", "hello",  &InvokeCommand<&WebServerManager::Cmd_AuthHello>,
-          "Ask whether this connection has to log in before anything else will be "
-          "answered. With no web password set - the default - it never does." },
-        { "auth", "login",  &InvokeCommand<&WebServerManager::Cmd_AuthLogin>,
-          "Authenticate this connection with the device's web password. On success "
-          "the reply carries a session key that 'auth resume' takes." },
-        { "auth", "resume", &InvokeCommand<&WebServerManager::Cmd_AuthResume>,
-          "Re-authenticate a reconnected client with the session key a previous "
-          "'auth login' handed out, instead of the password again." },
-    };
+    // Defined in WebServerManager.cpp, beside the handler and the argument it reads.
+    static CommandEntry readCommand_;
 };

@@ -26,7 +26,7 @@ It is built on [Strux](https://github.com/vanBassum/Strux), an ESP32 firmware fo
 |-------|-------|
 | Firmware | C++, ESP-IDF v6.0, FreeRTOS |
 | Frontend | React 19, TypeScript, Vite, Tailwind CSS, shadcn/ui |
-| Target | ESP32 (4 MB flash) |
+| Target | Any ESP32 board that declares itself — `esp32_devkit` and `esp32c3_supermini` today, both 4 MB; flash size and partition layout are the board's, not the project's |
 | CI/CD | GitHub Actions — builds firmware + frontend, publishes releases |
 
 ---
@@ -41,19 +41,19 @@ Wavy/
 │   │   ├── StruxContext.h             # Owns every framework manager + the init order
 │   │   ├── StruxProvider.h            # What one framework manager may reach for
 │   │   ├── CommandManager/            # Command dispatch (WebSocket + relay)
-│   │   ├── ConsoleManager/            # Log capture + WebSocket broadcast
+│   │   ├── ConsoleManager/            # Log capture into a ring consumers read
 │   │   ├── NetworkManager/            # WiFi STA/AP with retry and fallback
+│   │   ├── PartitionManager/          # Partitions by label: read, write, erase, boot slot
 │   │   ├── RelayManager/              # Outbound pipe for off-LAN access
 │   │   ├── SettingsManager/           # NVS key-value store
 │   │   ├── SystemManager/             # Device identity, ping/info/reboot
 │   │   ├── TelemetryManager/          # Measurements out via the relay
 │   │   ├── TimeManager/               # SNTP + timezone
-│   │   ├── UpdateManager/             # OTA firmware, any partition by label
 │   │   ├── WebServerManager/          # HTTP + WebSocket server
 │   │   └── lib/                       # Reusable utilities
 │   │       ├── common/                # Stream, MemoryStream, BufferStream, Fatal
 │   │       ├── json/                  # JsonWriter, JsonReader
-│   │       ├── protocol/              # CommandContext, ArgReader, ReplyWriter, Session
+│   │       ├── protocol/              # Connection, Channel, Transport, ArgReader, ReplyWriter
 │   │       ├── rtos/                  # Task, Mutex, Timer, InitState
 │   │       └── system/                # DateTime, TimeSpan
 │   ├── app/                           # THE APPLICATION — this is what a fork writes
@@ -65,9 +65,12 @@ Wavy/
 │   │   │   ├── esp32_devkit/          # Generic ESP32 DevKit (default)
 │   │   │   │   ├── BoardConfig.h      # Pin definitions for this board
 │   │   │   │   ├── BoardContext.h/.cpp # Owns all drivers, answers BoardProvider
-│   │   │   │   └── board.cmake        # Board build fragment (adds BoardContext.cpp)
+│   │   │   │   ├── board.cmake        # Board build fragment (adds BoardContext.cpp)
+│   │   │   │   ├── sdkconfig.defaults # This board's hardware: flash size/mode/speed,
+│   │   │   │   │                      # console routing, the table below (REQUIRED)
+│   │   │   │   └── partitions.csv     # This board's partition layout
 │   │   │   └── esp32c3_supermini/     # ESP32-C3 SuperMini (RISC-V, USB-C)
-│   │   │       └── ...                # Same four files + sdkconfig.defaults overlay
+│   │   │       └── ...                # Same six files
 │   │   ├── interfaces/                # Role interfaces (application vocabulary)
 │   │   │   ├── BoardProvider.h        # The roles every board owes
 │   │   │   └── Led.h                  # Led role: Set/IsOn + On/Off/Toggle helpers
@@ -77,15 +80,16 @@ Wavy/
 ├── frontend/                          # React web UI (Vite + Tailwind + shadcn)
 ├── www/                               # Build output — packed into one blob, linked into the app
 ├── CMakeLists.txt                     # Root ESP-IDF project config
-├── partitions.csv                     # Flash partition layout
-└── sdkconfig.defaults                 # ESP-IDF defaults
+└── sdkconfig.defaults                 # What the APPLICATION needs of any platform —
+                                       # hardware (flash size, partition table) lives
+                                       # in each board's own sdkconfig.defaults
 ```
 
 ### The key separation
 
 | Folder | Contains | Changes when you... |
 |--------|----------|---------------------|
-| `hardware/boards/<name>/` | Pin definitions, the board's `BoardContext` class (owns all driver instances), `board.cmake`, optional `sdkconfig.defaults` overlay | Swap or add a board |
+| `hardware/boards/<name>/` | Pin definitions, the board's `BoardContext` class (owns all driver instances), `board.cmake`, and the board's own `sdkconfig.defaults` + `partitions.csv` — flash size, timing and layout are the board's | Swap or add a board |
 | `hardware/interfaces/` | Role interfaces the application speaks (`Led`) — small, application vocabulary | Application expects a new capability |
 | `hardware/drivers/` | Board-independent chip/peripheral drivers implementing the roles | Add a peripheral |
 | `strux/` | The framework: managers, dispatch, transports, settings, OTA | The template improves — pull it into a fork |
@@ -109,8 +113,8 @@ The target board is selected at configure time with `-DBOARD=<name>` (default: `
 
 1. Copy `main/hardware/boards/esp32_devkit/` to `main/hardware/boards/<your_board>/` and edit `BoardConfig.h` and `BoardContext.h`/`BoardContext.cpp` (bind each role to a real driver or a `Mock*` one)
 2. Add extra board-only source files to `BOARD_SOURCES` in its `board.cmake` (optional)
-3. Add `sdkconfig.defaults` in the board folder if the board needs different flash size, PSRAM, or partitions (optional)
-4. Build with `idf.py -DBOARD=<your_board> build`
+3. Edit the copied `sdkconfig.defaults` — flash size, mode and speed, PSRAM, console routing — and point `CONFIG_PARTITION_TABLE_CUSTOM_FILENAME` at the copied `partitions.csv`, sized to this board's flash. **Not optional:** without the file the build stops, because ESP-IDF's own flash-size default would otherwise produce a wrongly sized image. Nothing outside the folder changes — a board with 16 MB and an extra storage partition needs no edit to the root `sdkconfig.defaults`.
+4. Build with `idf.py -DBOARD=<your_board> set-target <chip>` then `idf.py -DBOARD=<your_board> build`
 
 Shared chip drivers (sensors, displays, expanders) go in `main/hardware/drivers/`, parameterized through `BoardConfig` constants so every board can reuse them.
 
@@ -186,14 +190,14 @@ Board (bottom — depends on nothing above it)
 └── the selected board's hardware: LED, sensors, buses
 
 StruxContext (the framework — answers StruxProvider)
-├── ConsoleManager        — Captures ESP-IDF logs, broadcasts via WebSocket
+├── ConsoleManager        — Captures ESP-IDF logs into a ring; each Connection holds a cursor
 ├── SettingsManager       — NVS read/write behind typed setting objects
 ├── SystemManager         — Device identity, ping/info/reboot commands
 ├── NetworkManager        — WiFi STA/AP with retry and fallback
 │   └── WiFiInterface     — ESP WiFi abstraction (swappable for Ethernet)
 ├── TimeManager           — SNTP time sync with timezone support
 ├── CommandManager        — Pure dispatcher for commands registered by other managers
-├── UpdateManager         — Session-based updates to any partition by label
+├── PartitionManager      — Partitions by label: read, write, erase, boot slot
 ├── WebServerManager      — HTTP + WebSocket server, static file serving
 │   ├── StaticFileHandler
 │   └── WebSocketHandler

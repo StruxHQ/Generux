@@ -27,6 +27,7 @@ struct Setting
     const char* const key;    // NVS key — a storage detail, not an API
     const char* const label;  // shown in the generated settings UI
     const SettingType type;
+    const SettingFlags flags;
 
     Setting(const Setting&) = delete;
     Setting& operator=(const Setting&) = delete;
@@ -56,8 +57,8 @@ struct Setting
     }
 
 protected:
-    Setting(const char* key, const char* label, SettingType type)
-        : key(key), label(label), type(type) {}
+    Setting(const char* key, const char* label, SettingType type, SettingFlags flags)
+        : key(key), label(label), type(type), flags(flags) {}
 
     // Logs what was asked for AND what it actually is:
     //   "setting 'mqtt.port' is int32, not string"

@@ -1,31 +1,89 @@
 // Singleton backend service — all communication over a single WebSocket.
 
 import { DEV_HOST } from "@/config"
+import { ReplyReader } from "./reply"
+import { ConsoleReplyReader, type ConsoleReply } from "./consoleReply"
 
 const TOKEN_KEY = "device.token"
 
 // ── Types ────────────────────────────────────────────────────────
 
 type BroadcastHandler = (msg: Record<string, unknown>) => void
-type BinaryHandler = (data: ArrayBuffer) => void
 
 interface PendingRequest {
   resolve: (data: unknown) => void
   reject: (err: Error) => void
   timer: ReturnType<typeof setTimeout>
   timeoutMs: number
-  chunks: Uint8Array[]
-  received: number
-  // When set, each non-final reply chunk is parsed as its own JSON message and
-  // passed here (e.g. upload progress); the final chunk resolves the request.
-  // Absent → default behaviour: accumulate all chunks and parse once at FINAL.
+  // Turns transport chunks back into reply records. It, and not this file, is
+  // what knows the reply format — and WHICH one it knows is the codec's business,
+  // because a record separator belongs to a codec rather than to the protocol.
+  // See lib/reply.ts (JSON) and lib/consoleReply.ts (console).
+  reader: ReplyReader | ConsoleReplyReader
+  // Called for each record completed before the last one. A record is delimited
+  // by a newline in the BYTES, so this fires the same way whatever size the
+  // transport framed in.
   onMessage?: (msg: Record<string, unknown>) => void
-  // Binary reply mode (e.g. partition download): accumulate raw chunks and
-  // resolve with the reassembled Uint8Array instead of parsing JSON. onData
-  // reports cumulative bytes received, for progress.
-  binary?: boolean
+  // Called for each completed record as its TEXT, before onMessage parses it. A
+  // caller that has no type for the reply — the command console — still wants a
+  // record that is not JSON, which onMessage drops.
+  onRecord?: (text: string) => void
+  // The reply is in the CONSOLE codec, so its records are divided by `---` and
+  // not by a newline, and it resolves with that reader's result.
+  wantsConsole?: boolean
+  // The caller expects a declared body (a header record with contentType, then
+  // bytes). Resolves with { header, body } instead of the parsed record.
+  wantsBody?: boolean
+  // Cumulative BODY bytes, for progress.
   onData?: (received: number) => void
 }
+
+/** A reply that declared a body: the header record, and the bytes after it. */
+export interface BodyReply<H = Record<string, unknown>> {
+  header: H
+  body: Uint8Array
+}
+
+/** Per-call options for `send`. A strict subset of what `awaitReply` takes: the
+ *  binary-reply machinery stays private, because `send<T>` resolves with parsed
+ *  JSON and a caller asking for bytes wants `readFile`, not a flag.
+ *
+ *  `M` is the progress record's shape. It defaults to `Record<string, unknown>`
+ *  so `send<Result>(...)` is unchanged, and a caller who knows the shape can
+ *  write `send<Result, Progress>(...)` instead of narrowing in the callback. */
+export interface SendOptions<M = Record<string, unknown>> {
+  /** Bounds SILENCE, not total transfer time - each chunk restarts it. Default
+   *  10 s, which is short for anything that writes flash. */
+  timeoutMs?: number
+
+  /** Called for each reply RECORD completed before the last one.
+   *
+   *  A record is delimited by a newline in the bytes, so this fires the same way
+   *  whatever size the transport framed in, and an ordinary reply -- which is a
+   *  single record of any length -- produces none of them. Passing this is
+   *  therefore safe for any command: at worst nothing arrives.
+   *
+   *  That was NOT true when this was first exposed. It used to hand over every
+   *  non-final transport chunk, so a reply merely longer than the reply window
+   *  was delivered as fragments and then failed to parse. See lib/reply.ts. */
+  onMessage?: (msg: M) => void
+}
+
+/** Thrown when an upload was cancelled from the UI. A distinct type because a
+ *  cancel is not a failure and must not be reported as one. */
+export class UploadCancelled extends Error {
+  constructor() {
+    super("Upload cancelled")
+    this.name = "UploadCancelled"
+  }
+}
+
+/** What a login attempt came to. `error` is set only when the device gave a
+ *  reason of its own - a rate limit today - so its absence means an ordinary
+ *  wrong password. */
+export type LoginOutcome =
+  | { ok: true }
+  | { ok: false; error?: string; retryAfter?: number }
 
 export type ConnectionStatus = "connected" | "connecting" | "disconnected"
 type StatusHandler = (status: ConnectionStatus) => void
@@ -33,15 +91,28 @@ type AuthHandler = (authenticated: boolean) => void
 
 // ── Service ──────────────────────────────────────────────────────
 
-// Session ids correlate a reply with its request. The device is single-in-flight
-// (one active session at a time), so opens are SERIALIZED through a FIFO queue
-// (see `enqueue`): callers still fire concurrently, but only one session is open
-// on the wire at once, and the next starts on the previous reply's FINAL. Ids
-// stay within 16 bits to match the wire.
-let nextSession = 1
-
+// The browser is a PEER, not a client. It handshakes, owns half the channel-id
+// space, opens channels from it, and accepts channels the device opens at it.
+//
+// The device is still single-in-flight, so opens are SERIALIZED through a FIFO
+// queue (see `enqueue`): callers fire concurrently, one channel is active on the
+// wire at a time, and the next starts on the previous reply's FINAL. That is
+// policy, not protocol - the wire would carry several at once.
 const FLAG_FINAL = 0x01
-const FLAG_REJECT = 0x02
+const FLAG_RESET = 0x02
+const FLAG_OPEN = 0x04
+const FLAG_CONTROL = 0x08
+
+const PROTOCOL_VERSION = 1
+const MAX_HANDSHAKE_ATTEMPTS = 3
+
+// Two contiguous halves; the handshake decides which is ours. Nothing is
+// reserved - channel 0 is an ordinary id, and CONTROL frames merely write it and
+// have it ignored.
+const LOW_BASE = 0x0000
+const LOW_LIMIT = 0x8000
+const HIGH_BASE = 0x8000
+const HIGH_LIMIT = 0x10000
 
 // The device UI runs in two places, and its WebSocket follows the page:
 //   • served by the device            → ws://<device>/ws
@@ -64,7 +135,6 @@ class BackendService {
   private ws: WebSocket | null = null
   private pending = new Map<number, PendingRequest>()
   private broadcastHandlers = new Set<BroadcastHandler>()
-  private binaryHandlers = new Set<BinaryHandler>()
   private statusHandlers = new Set<StatusHandler>()
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null
@@ -72,6 +142,16 @@ class BackendService {
   // Tail of the open-serialization queue. Each enqueued task runs only after the
   // previous one has fully settled (its reply's FINAL received, or it failed).
   private queue: Promise<unknown> = Promise.resolve()
+
+  // ── Connection state (reset on every socket) ──────────────────────────────
+  private ready = false
+  private readyWaiters: Array<{ resolve: () => void; reject: (e: Error) => void }> = []
+  private nonce = 0n
+  private handshakeAttempts = 0
+  private lowHalf = false
+  private nextChannel = 0
+  // Channels the DEVICE opened at us, by id, with the name from its envelope.
+  private theirChannels = new Map<number, string>()
   private _status: ConnectionStatus = "disconnected"
   private token: string | null = sessionStorage.getItem(TOKEN_KEY)
   private authHandlers = new Set<AuthHandler>()
@@ -128,8 +208,11 @@ class BackendService {
     this.ensureConnected().catch(() => {})
   }
 
+  // "Connected" means the channel layer is up, not that the socket opened. A
+  // command sent between those two points would be dropped by the device, which
+  // refuses channel traffic before READY.
   private ensureConnected(): Promise<void> {
-    if (this.ws?.readyState === WebSocket.OPEN) return Promise.resolve()
+    if (this.ws?.readyState === WebSocket.OPEN && this.ready) return Promise.resolve()
     if (this.connecting) return this.connecting
     return this.doConnect()
   }
@@ -151,9 +234,21 @@ class BackendService {
       ws.onopen = () => {
         opened = true
         this.ws = ws
-        this.setStatus("connected")
-        void this.doHandshake()   // establishes auth in-band; sets authenticated
-        resolve()
+        // Ours goes out unprompted; the device's is already on its way. Nothing
+        // else may be sent until both have landed, which is why resolve() waits
+        // on whenReady() rather than on the socket.
+        this.resetConnectionState()
+        this.sendHandshake()
+        this.whenReady().then(
+          () => {
+            this.setStatus("connected")
+            void this.doAuth()   // in-band auth, once the channel layer is up
+            resolve()
+          },
+          (err) => {
+            reject(err instanceof Error ? err : new Error("handshake failed"))
+          },
+        )
       }
 
       ws.onmessage = (ev) => {
@@ -170,6 +265,8 @@ class BackendService {
         this.ws = null
         this.stopHeartbeat()
         this.setStatus("disconnected")
+        this.failHandshakeWaiters(new Error("WebSocket closed"))
+        this.resetConnectionState()
         // Keep `authenticated` as-is across a brief drop — the reconnect's
         // auth{key} either resumes silently or fails (then doHandshake shows login).
         for (const [, req] of this.pending) {
@@ -193,10 +290,11 @@ class BackendService {
     return p
   }
 
-  // Establish auth in-band right after the socket opens: hello tells us whether
-  // auth is required; if so, resume with the stored key or fall back to the
-  // login page. Runs on every (re)connect.
-  private async doHandshake() {
+  // Auth, in band, once the channel layer is READY: `auth hello` says whether a
+  // password is set; if so, resume with the stored key or fall back to the login
+  // page. Runs on every (re)connect. Named apart from the CONNECTION handshake
+  // above, which is a different thing that used to share the word.
+  private async doAuth() {
     try {
       const info = await this.send<{ authRequired: boolean }>("auth hello")
       if (!info.authRequired) {
@@ -240,6 +338,14 @@ class BackendService {
 
   // Run `task` after every previously-enqueued task has settled — the
   // open-serialization queue. A task's failure never stalls the queue.
+  //
+  // A task queued from INSIDE a running task deadlocks: the inner one chains
+  // onto a queue whose tail is the outer one, so it waits for the task that is
+  // waiting for it. There is no timeout on that and no error — it simply never
+  // happens, which is what made an upload sit at 0% forever with the device
+  // idle. A multi-command sequence that must own the socket (see
+  // `uploadPartition`) therefore calls `sendUnqueued` for its inner steps: it
+  // already holds the slot.
   private enqueue<T>(task: () => Promise<T>): Promise<T> {
     const run = this.queue.then(task, task)
     this.queue = run.then(
@@ -249,10 +355,100 @@ class BackendService {
     return run
   }
 
+  /** Next free id in our half, skipping anything still in flight. */
   private allocSession(): number {
-    const session = nextSession
-    nextSession = nextSession >= 0xffff ? 1 : nextSession + 1
-    return session
+    const base = this.lowHalf ? LOW_BASE : HIGH_BASE
+    const limit = this.lowHalf ? LOW_LIMIT : HIGH_LIMIT
+    for (let i = 0; i < limit - base; i++) {
+      const id = this.nextChannel
+      this.nextChannel = id + 1 >= limit ? base : id + 1
+      if (!this.pending.has(id) && !this.theirChannels.has(id)) return id
+    }
+    throw new Error("no free channel ids")
+  }
+
+  private drawNonce(): bigint {
+    const a = new BigUint64Array(1)
+    crypto.getRandomValues(a)
+    return a[0]
+  }
+
+  /** Our half of the handshake, sent unprompted the moment the socket opens. */
+  private sendHandshake(mixIn = 0n) {
+    this.nonce = (this.drawNonce() ^ mixIn) & 0xffffffffffffffffn
+    this.handshakeAttempts++
+    const body = new Uint8Array(9)
+    body[0] = PROTOCOL_VERSION
+    let v = this.nonce
+    for (let i = 0; i < 8; i++) {
+      body[1 + i] = Number(v & 0xffn)
+      v >>= 8n
+    }
+    // Channel 0 by convention, ignored on receipt.
+    this.sendChunk(0, FLAG_CONTROL, body)
+  }
+
+  private onControl(body: Uint8Array) {
+    if (body.length < 9) return
+
+    if (this.ready) {
+      // The device restarted underneath us. Drop what we thought we knew and
+      // handshake again rather than talking about channels it has forgotten.
+      this.resetConnectionState()
+      this.sendHandshake()
+    }
+
+    const version = body[0]
+    if (version !== PROTOCOL_VERSION) {
+      this.failHandshake(
+        new Error(`device speaks protocol ${version}, this UI speaks ${PROTOCOL_VERSION}`),
+      )
+      return
+    }
+
+    let peer = 0n
+    for (let i = 7; i >= 0; i--) peer = (peer << 8n) | BigInt(body[1 + i])
+
+    if (peer === this.nonce) {
+      if (this.handshakeAttempts >= MAX_HANDSHAKE_ATTEMPTS) {
+        this.failHandshake(new Error("handshake nonce collision"))
+        return
+      }
+      // Mix the peer's nonce in so two identical draws diverge.
+      this.sendHandshake(peer)
+      return
+    }
+
+    this.lowHalf = this.nonce > peer
+    this.nextChannel = this.lowHalf ? LOW_BASE : HIGH_BASE
+    this.ready = true
+    for (const w of this.readyWaiters) w.resolve()
+    this.readyWaiters = []
+  }
+
+  private failHandshake(err: Error) {
+    this.failHandshakeWaiters(err)
+    this.ws?.close()
+  }
+
+  private failHandshakeWaiters(err: Error) {
+    for (const w of this.readyWaiters) w.reject(err)
+    this.readyWaiters = []
+  }
+
+  private resetConnectionState() {
+    this.ready = false
+    this.nonce = 0n
+    this.handshakeAttempts = 0
+    this.lowHalf = false
+    this.nextChannel = 0
+    this.theirChannels.clear()
+  }
+
+  /** Resolves once the handshake has settled. Nothing may be sent before it. */
+  private whenReady(): Promise<void> {
+    if (this.ready) return Promise.resolve()
+    return new Promise((resolve, reject) => this.readyWaiters.push({ resolve, reject }))
   }
 
   // Send one session chunk: [session:u16 LE | flags | payload].
@@ -274,10 +470,14 @@ class BackendService {
     opts: {
       timeoutMs?: number
       onMessage?: (msg: Record<string, unknown>) => void
-      binary?: boolean
+      onRecord?: (text: string) => void
+      wantsConsole?: boolean
+      wantsBody?: boolean
       onData?: (received: number) => void
     } = {},
   ): Promise<T> {
+    // `?? 10000` and not a default parameter, because callers forward an
+    // optional straight through and undefined has to mean "unset", not "zero".
     const timeoutMs = opts.timeoutMs ?? 10000
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -289,10 +489,11 @@ class BackendService {
         reject,
         timer,
         timeoutMs,
-        chunks: [],
-        received: 0,
+        reader: opts.wantsConsole ? new ConsoleReplyReader() : new ReplyReader(),
+        wantsConsole: opts.wantsConsole,
         onMessage: opts.onMessage,
-        binary: opts.binary,
+        onRecord: opts.onRecord,
+        wantsBody: opts.wantsBody,
         onData: opts.onData,
       })
     })
@@ -310,118 +511,152 @@ class BackendService {
     }, req.timeoutMs)
   }
 
-  async send<T>(
+  async send<T, M = Record<string, unknown>>(
     type: string,
     params: Record<string, unknown> = {},
+    opts: SendOptions<M> = {},
   ): Promise<T> {
-    return this.enqueue(async () => {
-      await this.ensureConnected()
-      const session = this.allocSession()
-      const reply = this.awaitReply<T>(session)
-      // Request = one FINAL session chunk: the command JSON + '\n' (the device
-      // splits the header line from any body; these commands have no body).
-      const body = new TextEncoder().encode(JSON.stringify({ type, ...params }) + "\n")
-      this.sendChunk(session, FLAG_FINAL, body)
-      return reply
-    })
+    return this.enqueue(() => this.sendUnqueued<T, M>(type, params, opts))
   }
 
-  // Reassemble a reply from its session chunks. Each chunk is
-  // [session:u16 LE | flags | payload]; FLAG_FINAL ends the reply, FLAG_REJECT
-  // is a transport/framework refusal whose payload is the reason.
+  /** One command, WITHOUT taking a queue slot. Only for a caller that already
+   *  holds one — see the deadlock note on `enqueue`. */
+  private async sendUnqueued<T, M = Record<string, unknown>>(
+    type: string,
+    params: Record<string, unknown> = {},
+    opts: SendOptions<M> = {},
+  ): Promise<T> {
+    await this.ensureConnected()
+    const session = this.allocSession()
+    const reply = this.awaitReply<T>(session, {
+      timeoutMs: opts.timeoutMs,
+      onMessage: opts.onMessage as ((msg: Record<string, unknown>) => void) | undefined,
+    })
+    // Request = one FINAL session chunk: the command JSON + '\n' (the device
+    // splits the header line from any body; these commands have no body).
+    const body = new TextEncoder().encode(JSON.stringify({ type, ...params }) + "\n")
+    // OPEN|FINAL: the whole request in one frame, and our direction closed with it.
+    this.sendChunk(session, FLAG_OPEN | FLAG_FINAL, body)
+    return reply
+  }
+
+  // Reassemble a reply from its channel frames. Each frame is
+  // [channel:u16 LE | flags | payload]; FLAG_FINAL ends a direction, FLAG_RESET
+  // terminates the channel and its payload is the reason.
   private onBinaryChunk(data: ArrayBuffer) {
     const view = new Uint8Array(data)
     if (view.length < 3) return
     const session = view[0] | (view[1] << 8)
     const flags = view[2]
 
-    // Session 0 is reserved for device-initiated broadcasts (log lines).
-    if (session === 0) {
+    // Connection-level. The channel id is written as 0 and means nothing here.
+    if (flags & FLAG_CONTROL) {
+      this.onControl(view.subarray(3))
+      return
+    }
+
+    // A channel the DEVICE opened at us. Nothing is reserved any more: it names
+    // itself in the envelope on its OPEN frame, exactly as a command does, and
+    // what used to be "session 0 is logs" is now "this channel said it is logs".
+    if (flags & FLAG_OPEN && !this.pending.has(session)) {
+      let name = ""
       try {
-        this.broadcastHandlers.forEach((fn) => fn(JSON.parse(new TextDecoder().decode(view.subarray(3)))))
+        name = String(JSON.parse(new TextDecoder().decode(view.subarray(3)).trim()).type ?? "")
       } catch {
-        /* malformed broadcast — ignore */
+        /* unreadable envelope: refuse below */
+      }
+      if (name === "log stream") {
+        this.theirChannels.set(session, name)
+      } else {
+        // Silence is acceptance, so a refusal has to be said. RESET is it.
+        this.sendChunk(session, FLAG_RESET, new TextEncoder().encode("unknown stream"))
       }
       return
     }
 
-    const req = this.pending.get(session)
-    if (!req) {
-      // No matching request — hand to legacy binary subscribers (unused here).
-      this.binaryHandlers.forEach((fn) => fn(data))
+    const theirs = this.theirChannels.get(session)
+    if (theirs !== undefined) {
+      if (flags & FLAG_RESET) {
+        this.theirChannels.delete(session)
+        return
+      }
+      if (theirs === "log stream") {
+        try {
+          const msg = JSON.parse(new TextDecoder().decode(view.subarray(3)))
+          this.broadcastHandlers.forEach((fn) => fn(msg))
+        } catch {
+          /* malformed record: ignore */
+        }
+      }
       return
     }
-    if (flags & FLAG_REJECT) {
+
+    // No matching request: a reply to something that already timed out, or
+    // residue from a channel that has closed. Dropping it is the whole handling.
+    const req = this.pending.get(session)
+    if (!req) return
+    if (flags & FLAG_RESET) {
       this.pending.delete(session)
       clearTimeout(req.timer)
       req.reject(new Error(new TextDecoder().decode(view.subarray(3)) || "rejected"))
       return
     }
 
-    // Binary reply (e.g. partition download): accumulate raw chunks, report
-    // cumulative bytes for progress, and resolve with the reassembled bytes at
-    // FINAL. The caller interprets the payload (image bytes, or a short JSON
-    // error object the device may send instead).
-    if (req.binary) {
-      const chunk = view.subarray(3)
-      req.chunks.push(chunk)
-      req.received += chunk.length
-      this.bumpTimer(session)
-      req.onData?.(req.received)
-      if (flags & FLAG_FINAL) {
-        this.pending.delete(session)
-        clearTimeout(req.timer)
-        const buf = new Uint8Array(req.received)
-        let off = 0
-        for (const c of req.chunks) {
-          buf.set(c, off)
-          off += c.length
-        }
-        req.resolve(buf)
-      }
-      return
-    }
+    // ONE path for every reply shape, because the wire has one: records
+    // separated by newlines, optionally followed by a declared body. The reader
+    // owns that; this only decides what to do with what it hands back.
+    //
+    // What is gone with the two branches that used to be here is the assumption
+    // underneath both of them -- that a transport chunk is a unit of meaning. It
+    // never was. A chunk is emitted when Channel's reply buffer fills, and also
+    // when a handler flushes a record, and those are the same frame with the
+    // same flags. See lib/reply.ts and main/lib/protocol/ReplyBody.h.
+    const records = req.reader.push(view.subarray(3))
+    this.bumpTimer(session)
 
-    // Streaming reply: each chunk is one complete JSON message. Intermediate
-    // chunks go to onMessage; the FINAL chunk resolves the request.
-    if (req.onMessage) {
-      const text = new TextDecoder().decode(view.subarray(3))
-      if (flags & FLAG_FINAL) {
-        this.pending.delete(session)
-        clearTimeout(req.timer)
-        try {
-          req.resolve(text.length ? JSON.parse(text) : {})
-        } catch (e) {
-          req.reject(e instanceof Error ? e : new Error("bad reply"))
-        }
-      } else if (text.length) {
-        this.bumpTimer(session)
-        try {
-          req.onMessage(JSON.parse(text))
-        } catch {
-          /* ignore a malformed progress message */
-        }
-      }
-      return
-    }
-
-    req.chunks.push(view.subarray(3))
-    if (flags & FLAG_FINAL) {
-      this.pending.delete(session)
-      clearTimeout(req.timer)
-      const total = req.chunks.reduce((a, c) => a + c.length, 0)
-      const buf = new Uint8Array(total)
-      let off = 0
-      for (const c of req.chunks) {
-        buf.set(c, off)
-        off += c.length
-      }
-      const text = new TextDecoder().decode(buf)
+    for (const text of records) {
+      req.onRecord?.(text)
+      if (!req.onMessage) continue
       try {
-        req.resolve(text.length ? JSON.parse(text) : {})
-      } catch (e) {
-        req.reject(e instanceof Error ? e : new Error("bad reply"))
+        req.onMessage(JSON.parse(text))
+      } catch {
+        /* a record that is not JSON is not a progress message; ignore it */
       }
+    }
+    if (req.onData && req.reader.hasBody) req.onData(req.reader.received)
+
+    if (!(flags & FLAG_FINAL)) return
+
+    this.pending.delete(session)
+    clearTimeout(req.timer)
+
+    if (req.wantsConsole) {
+      req.resolve((req.reader as ConsoleReplyReader).end())
+      return
+    }
+
+    const reply = (req.reader as ReplyReader).end()
+
+    if (req.wantsBody) {
+      if (!reply.body || !reply.header) {
+        // The command answered without declaring a body. That is a refusal
+        // record -- an unknown partition, a closed door -- and it is now
+        // readable AS a refusal instead of being guessed at by length and
+        // prefix, which is what this used to do.
+        const refusal = tryParse(reply.result) ?? tryParse(reply.records.at(-1) ?? "")
+        const why = typeof refusal?.error === "string" ? refusal.error : "no body in reply"
+        req.reject(new Error(why))
+        return
+      }
+      req.onData?.(reply.body.length)
+      req.resolve({ header: reply.header, body: reply.body })
+      return
+    }
+
+    try {
+      req.resolve(reply.result.length ? JSON.parse(reply.result) : {})
+    } catch (e) {
+      req.reject(e instanceof Error ? e : new Error("bad reply"))
     }
   }
 
@@ -430,14 +665,6 @@ class BackendService {
     this.ensureConnected().catch(() => {})
     return () => {
       this.broadcastHandlers.delete(fn)
-    }
-  }
-
-  subscribeBinary(fn: BinaryHandler): () => void {
-    this.binaryHandlers.add(fn)
-    this.ensureConnected().catch(() => {})
-    return () => {
-      this.binaryHandlers.delete(fn)
     }
   }
 
@@ -453,6 +680,40 @@ class BackendService {
 
   async getUpdateStatus(): Promise<UpdateStatus> {
     return this.send<UpdateStatus>("partition status")
+  }
+
+  /** The device's whole command registry, in one reply.
+   *
+   *  This is the device describing ITSELF — names, descriptions and argument
+   *  declarations — so nothing here is a list this file maintains. The command
+   *  console is built entirely out of what this returns. */
+  async describeCommands(): Promise<CommandRegistry> {
+    return this.send<CommandRegistry>("help", {}, { timeoutMs: 20000 })
+  }
+
+  /** One command in the CONSOLE codec: the line as typed, verbatim.
+   *
+   *  Nothing is translated on the way out — `led set enabled=true` reaches the
+   *  device as those bytes, and the firmware's ConsoleEnvelope is what reads
+   *  them. The reply comes back as YAML records, which is why this has a reader
+   *  of its own: `send` divides records by newline, and that is the JSON codec's
+   *  separator rather than the protocol's. */
+  async runConsole(
+    line: string,
+    opts: { timeoutMs?: number; onRecord?: (text: string) => void } = {},
+  ): Promise<ConsoleReply> {
+    return this.enqueue(async () => {
+      await this.ensureConnected()
+      const session = this.allocSession()
+      const reply = this.awaitReply<ConsoleReply>(session, {
+        timeoutMs: opts.timeoutMs ?? 30000,
+        onRecord: opts.onRecord,
+        wantsConsole: true,
+      })
+      this.sendChunk(session, FLAG_OPEN | FLAG_FINAL, new TextEncoder().encode(`${line}
+`))
+      return reply
+    })
   }
 
   async getSettings(): Promise<SettingsResponse> {
@@ -500,17 +761,28 @@ class BackendService {
     return this.send<WaveState>("wave set", params)
   }
 
-  /** Returns false on wrong password; throws on connection failure. On success
-   *  stores the session key and marks the connection authenticated. */
-  async login(password: string): Promise<boolean> {
+  /** Throws on connection failure. On success stores the session key and marks
+   *  the connection authenticated.
+   *
+   *  A refusal is not always a wrong password: the device rate-limits failed
+   *  logins and says so, and reporting that as "invalid password" is how
+   *  somebody spends an hour retyping a password that was right. */
+  async login(password: string): Promise<LoginOutcome> {
     await this.ensureConnected()
-    const res = await this.send<{ ok: boolean; key?: string }>("auth login", { password })
-    if (!res.ok) return false
+    const res = await this.send<{ ok: boolean; key?: string; error?: string; retryAfter?: number }>(
+      "auth login",
+      { password },
+    )
+    if (!res.ok) {
+      return res.error
+        ? { ok: false, error: res.error, retryAfter: res.retryAfter }
+        : { ok: false }
+    }
     this.token = res.key ?? null
     if (this.token) sessionStorage.setItem(TOKEN_KEY, this.token)
     this.setAuthenticated(true)
     this.startHeartbeat()
-    return true
+    return { ok: true }
   }
 
   /** One command whose REQUEST has a body: an envelope chunk (not FINAL), then
@@ -550,10 +822,14 @@ class BackendService {
       const envelope = new TextEncoder().encode(
         JSON.stringify({ type, ...(params ?? {}) }) + "\n",
       )
-      this.sendChunk(session, 0, envelope)
+      // OPEN, not FINAL: the body follows on the same channel.
+      this.sendChunk(session, FLAG_OPEN, envelope)
 
-      // CHUNK matches the device's inbound window: a larger frame is refused, not
-      // split.
+      // Kept under the smallest inbound window on the path — the device's own, or
+      // the relay's when there is one in between. It is a CONVENTION, not a
+      // contract: each hop owns its own framing and neither tells us its number.
+      // Overshooting now costs this one channel a RESET rather than the socket,
+      // which is what makes picking conservatively here good enough.
       const CHUNK = 4096
       let sent = 0
       while (sent < total) {
@@ -582,14 +858,19 @@ class BackendService {
     partition: string,
     file: File,
     onProgress?: (percent: number) => void,
+    signal?: AbortSignal,
   ): Promise<UploadResult> {
     return this.enqueue(async () => {
       await this.ensureConnected()
 
+      // sendUnqueued, not send: this task already holds the queue slot, and
+      // re-entering enqueue from here waits for this task to finish. See the
+      // note on `enqueue`.
+      //
       // Erase first: `partition write` never erases, and flash bits only clear on
       // erase, so writing over stale content would produce an image that fails
       // validation at activate.
-      const cleared = await this.send<{ ok: boolean; error?: string }>("partition clear", { partition })
+      const cleared = await this.sendUnqueued<{ ok: boolean; error?: string }>("partition clear", { partition })
       if (!cleared.ok) throw new Error(cleared.error ?? "partition clear failed")
 
       const session = this.allocSession()
@@ -613,12 +894,28 @@ class BackendService {
       // rejects a single-word type outright, so "writePartition" never reached the
       // handler — every upload from this page was refused before it started.
       const envelope = new TextEncoder().encode(JSON.stringify({ type: "partition write", partition }) + "\n")
-      this.sendChunk(session, 0, envelope)
+      // OPEN, not FINAL: the body follows on the same channel.
+      this.sendChunk(session, FLAG_OPEN, envelope)
 
-      // Body chunks. CHUNK matches the device's inbound window (see WebSocketHandler).
+      // Body chunks, kept under the smallest inbound window on the path. See the
+      // note on the other CHUNK above: a convention, not a negotiated limit.
       const CHUNK = 4096
       let sent = 0
       while (sent < total) {
+        if (signal?.aborted) {
+          // Stopping mid-body cannot just stop: the device is blocked reading
+          // this channel and would wait for a FINAL that is never coming, and a
+          // FINAL sent early would be read as a COMPLETE upload - a truncated
+          // image that passes for a whole one.
+          //
+          // This used to drop the whole socket, because there was no way to say
+          // "this one is over" without saying "this one finished". RESET is that
+          // way: the device's read fails, `partition write` reports it, the boot
+          // slot was never touched, and every other channel on the connection is
+          // untouched too.
+          this.sendChunk(session, FLAG_RESET, new TextEncoder().encode("cancelled"))
+          throw new UploadCancelled()
+        }
         const end = Math.min(sent + CHUNK, total)
         const slice = new Uint8Array(await file.slice(sent, end).arrayBuffer())
         const isLast = end >= total
@@ -632,14 +929,24 @@ class BackendService {
       const res = await reply
       if (!res.ok) throw new Error(res.error ?? "partition write failed")
 
-      // Validate and switch the boot slot only once every byte landed. Until this
-      // point the old slot still boots, so a failed upload leaves the device intact.
-      const act = await this.send<{ ok: boolean; error?: string }>("partition activate", { partition })
-      if (!act.ok) throw new Error(act.error ?? "partition activate failed")
-
+      // NOTHING is activated here. An upload writes bytes; choosing what boots is
+      // `partition activate`, which the Firmware page offers as its own button.
+      // Uploading used to switch the boot slot as its last step, which meant the
+      // only way to stage an image was to commit to it.
       onProgress?.(100)
       return { ok: true, size: res.size ?? sent }
     })
+  }
+
+  /** Choose which app partition boots. `restart` reboots into it immediately;
+   *  without it the switch waits for the next restart. This is the only call
+   *  that changes the boot slot — `reboot()` never does. */
+  async activatePartition(partition: string, restart = false): Promise<void> {
+    const res = await this.send<{ ok: boolean; error?: string }>("partition activate", {
+      partition,
+      restart,
+    })
+    if (!res.ok) throw new Error(res.error ?? "partition activate failed")
   }
 
   // Backpressure: don't let the browser-side WS buffer outrun the socket.
@@ -649,33 +956,33 @@ class BackendService {
     }
   }
 
-  /** One command whose REPLY is a stream: the envelope goes out as a single FINAL
-   *  chunk and the device writes bytes back until it FINALs, with no length header.
+  /** One command whose reply is a HEADER RECORD AND A BODY: the header names the
+   *  media type, the bytes follow it, and this returns both.
    *
-   *  The generic form of `downloadPartitionFile`, and the mirror of `uploadSession`.
-   *  It stops at the bytes on purpose: saving a file is a host concern — an anchor
-   *  click here, something else in another shell — while "give me the bytes" is the
-   *  same question everywhere, which is what makes it expressible in the contract.
+   *  Generic on purpose -- it names no command and no media type. That is the
+   *  whole point of #32: a caller that discovered a command through `help
+   *  describe` can perform it and read the answer without a second, private
+   *  agreement about which commands return bytes. The relay's MCP surface reads
+   *  replies by exactly this rule already (api/Mcp/DeviceReply.cs).
    *
-   *  `total`, when the caller knows it, is used for progress AND for a length check.
-   *  The device always streams a whole partition, so a short read means a mid-stream
-   *  flash or socket failure produced a truncated image followed by a FINAL — which
-   *  would otherwise be saved as a corrupt file that looks fine.
+   *  A command that refuses answers with an ordinary record and no body, and
+   *  that arrives here as a rejection carrying the device's own `error` -- not
+   *  as a tiny file. It used to be found by testing whether a short reply began
+   *  with {"ok":false, which a partition image is perfectly entitled to contain.
    *
-   *  Runs through the open queue, so it owns the socket until it finishes: the device
-   *  would REJECT an interleaved session id. */
-  async downloadSession(
+   *  Runs through the open queue, so it owns the socket until it finishes. */
+  async downloadSessionWithHeader<H = Record<string, unknown>>(
     type: string,
     params: Record<string, unknown> | undefined,
     total?: number,
     onProgress?: (fraction: number) => void,
-  ): Promise<Blob> {
-    const buf = await this.enqueue(async () => {
+  ): Promise<BodyReply<H>> {
+    const reply = await this.enqueue(async () => {
       await this.ensureConnected()
       const session = this.allocSession()
-      const reply = this.awaitReply<Uint8Array<ArrayBuffer>>(session, {
+      const pending = this.awaitReply<BodyReply<H>>(session, {
         timeoutMs: 120000,
-        binary: true,
+        wantsBody: true,
         onData: (received) => {
           if (total) onProgress?.(Math.min(1, received / total))
         },
@@ -683,68 +990,44 @@ class BackendService {
       const body = new TextEncoder().encode(
         JSON.stringify({ type, ...(params ?? {}) }) + "\n",
       )
-      this.sendChunk(session, FLAG_FINAL, body)
-      return reply
+      this.sendChunk(session, FLAG_OPEN | FLAG_FINAL, body)
+      return pending
     })
 
-    // A short reply that parses as a JSON error means the device refused instead of
-    // streaming bytes — an unknown partition, say. It arrives as a successful reply,
-    // so it has to be read out of the payload or a failure becomes a tiny "image".
-    if (buf.length < 256) {
-      const text = new TextDecoder().decode(buf)
-      if (text.startsWith('{"ok":false'))
-        throw new Error(JSON.parse(text).error ?? "download failed")
-    }
-
-    if (total && buf.length !== total)
-      throw new Error(`incomplete download: got ${buf.length} of ${total} bytes`)
+    // The device streams a whole partition, so a short body means a mid-stream
+    // flash or socket failure produced a truncated image followed by a FINAL --
+    // which would otherwise be saved as a corrupt file that looks fine. The
+    // header now states the size, so this no longer depends on the CALLER
+    // knowing it.
+    const declared =
+      typeof (reply.header as Record<string, unknown>).size === "number"
+        ? ((reply.header as Record<string, unknown>).size as number)
+        : total
+    if (declared !== undefined && reply.body.length !== declared)
+      throw new Error(`incomplete download: got ${reply.body.length} of ${declared} bytes`)
 
     onProgress?.(1)
-    return new Blob([buf])
+    return reply
   }
 
-  /** Download a partition image as one outbound streamed session and save it as
-   *  <label>.bin. The device writes the raw partition bytes to the reply stream,
-   *  chunked and ended by FINAL (or, on failure, a short JSON error object). The
-   *  reply is chunked with no length header, so progress is computed against
-   *  expectedSize — the UI knows it from the partition table. Runs through the
-   *  open queue, so it owns the socket until it finishes (the device would REJECT
-   *  an interleaved session id). */
+  /** Download a partition image and save it as <label>.bin.
+   *
+   *  Everything about reading the reply now lives in downloadSessionWithHeader;
+   *  what is left here is the one thing that is genuinely this method's own --
+   *  that a browser saves a file by clicking an anchor. */
   async downloadPartitionFile(
     label: string,
     expectedSize?: number,
     onProgress?: (percent: number) => void,
   ): Promise<void> {
-    const buf = await this.enqueue(async () => {
-      await this.ensureConnected()
-      const session = this.allocSession()
-      const reply = this.awaitReply<Uint8Array<ArrayBuffer>>(session, {
-        timeoutMs: 120000,
-        binary: true,
-        onData: (received) => {
-          if (expectedSize) onProgress?.(Math.min(100, Math.round((received / expectedSize) * 100)))
-        },
-      })
-      // Request = one FINAL chunk: the command envelope, no body.
-      const body = new TextEncoder().encode(JSON.stringify({ type: "partition read", partition: label }) + "\n")
-      this.sendChunk(session, FLAG_FINAL, body)
-      return reply
-    })
+    const { body } = await this.downloadSessionWithHeader(
+      "partition read",
+      { partition: label },
+      expectedSize,
+      (fraction) => onProgress?.(Math.round(fraction * 100)),
+    )
 
-    // A short reply that is a JSON error object means the device refused the
-    // request (e.g. unknown partition) instead of streaming image bytes.
-    if (buf.length < 256) {
-      const text = new TextDecoder().decode(buf)
-      if (text.startsWith('{"ok":false')) throw new Error(JSON.parse(text).error ?? "download failed")
-    }
-    // The device always streams the whole partition; a short read (a mid-stream
-    // flash/socket failure) would leave a truncated image + FINAL, so verify the
-    // length rather than silently saving a corrupt file.
-    if (expectedSize && buf.length !== expectedSize) {
-      throw new Error(`incomplete download: got ${buf.length} of ${expectedSize} bytes`)
-    }
-
-    const url = URL.createObjectURL(new Blob([buf]))
+    const url = URL.createObjectURL(new Blob([body as BlobPart]))
     const a = document.createElement("a")
     a.href = url
     a.download = `${label}.bin`
@@ -753,6 +1036,15 @@ class BackendService {
     onProgress?.(100)
   }
 
+}
+
+function tryParse(text: string): Record<string, unknown> | null {
+  try {
+    const v = JSON.parse(text)
+    return v && typeof v === "object" ? (v as Record<string, unknown>) : null
+  } catch {
+    return null
+  }
 }
 
 const instance = new BackendService()
@@ -811,6 +1103,8 @@ export interface SettingEntry {
   label: string
   type: SettingType
   value: string | number | boolean
+  hidden?: boolean
+  secret?: boolean
 }
 
 export interface SettingsResponse {
@@ -822,6 +1116,10 @@ export interface WifiNetwork {
   rssi: number
   channel: number
   secure: boolean
+  /// The auth mode by name ("WPA2", "WPA2/WPA3", "open"). `secure` is the padlock;
+  /// this is the detail that tells a refusal from a distance. Optional because a
+  /// device on older firmware does not send it.
+  auth?: string
 }
 
 export interface WifiScanResponse {
@@ -847,6 +1145,41 @@ export interface Partition {
 
 export interface PartitionsResponse {
   partitions: Partition[]
+}
+
+// ── Command self-description (`help`) ────────────────────────────
+//
+// The shape the device answers with, transcribed and nothing more. No command
+// name appears anywhere below, deliberately: everything the console knows about
+// a command it learned at runtime from this reply.
+
+/** The argument types `ArgTypeName` reports. */
+export type CommandArgType = "string" | "uint32" | "int32" | "float" | "bool"
+
+/** One declared argument of one command. */
+export interface CommandArgDesc {
+  name: string
+  type: CommandArgType
+  required: boolean
+  /** Strings only: the length at which the device refuses a value. */
+  maxLength?: number
+  /** Absent when the command did not describe it — which is not the same as an
+   *  empty description, and is worth showing differently. */
+  description?: string
+}
+
+export interface CommandDesc {
+  /** The command exactly as the wire carries it: `partition write`. */
+  name: string
+  description?: string
+  arguments: CommandArgDesc[]
+}
+
+/** Every command the device has, flat. The registry says nothing about grouping,
+ *  because grouping is a question about a command rather than part of it. */
+export interface CommandRegistry {
+  ok: boolean
+  commands: CommandDesc[]
 }
 
 export interface WaveState {

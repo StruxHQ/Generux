@@ -61,17 +61,11 @@ private:
     inline static UInt32Setting freqSetting_{ "wave.freq", "Square Wave Frequency (Hz)", 1000 };
 
     // ── Commands ──
-    RequestError Cmd_Get(CommandContext& ctx);
-    RequestError Cmd_Set(CommandContext& ctx);
+    CommandResult Cmd_Get(CommandContext& ctx);
+    CommandResult Cmd_Set(CommandContext& ctx);
     void WriteState(CommandContext& ctx, bool ok, const char* error);
 
-    inline static CommandEntry commands_[] = {
-        { "wave", "get", &InvokeCommand<&WaveManager::Cmd_Get>,
-          "Report the square-wave output: whether it is on, the frequency set, the "
-          "frequency actually produced, and the allowed range." },
-        { "wave", "set", &InvokeCommand<&WaveManager::Cmd_Set>,
-          "Set the square-wave frequency and/or switch the output on or off. Applied "
-          "immediately and persisted unless persist is false. Omitted arguments keep "
-          "their current value." },
-    };
+    // Defined in WaveManager.cpp, beside the handlers and the arguments they read.
+    static CommandEntry getCommand_;
+    static CommandEntry setCommand_;
 };

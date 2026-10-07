@@ -1,0 +1,19 @@
+name: Agent workspace
+description: What Claude needs to run the PC-side checks (host tests, frontend) and commit.
+runs:
+  using: composite
+  steps:
+    - uses: pnpm/action-setup@v6
+      with:
+        package_json_file: frontend/package.json
+    - uses: actions/setup-node@v7
+      with:
+        node-version: 22
+        cache: pnpm
+        cache-dependency-path: frontend/pnpm-lock.yaml
+    - shell: bash
+      run: |
+        cd frontend && pnpm install --frozen-lockfile
+        git config --global user.name "strux-agent"
+        git config --global user.email "noreply@anthropic.com"
+        mkdir -p /tmp/agent

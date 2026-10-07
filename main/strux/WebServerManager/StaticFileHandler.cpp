@@ -29,6 +29,7 @@ const char* StaticFileHandler::GetContentType(const char* ext)
     if (strcmp(ext, ".png") == 0) return "image/png";
     if (strcmp(ext, ".ico") == 0) return "image/x-icon";
     if (strcmp(ext, ".svg") == 0) return "image/svg+xml";
+    if (strcmp(ext, ".woff2") == 0) return "font/woff2";
     return "application/octet-stream";
 }
 

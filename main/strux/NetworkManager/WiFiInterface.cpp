@@ -136,9 +136,33 @@ bool WiFiInterface::GetRssi(int8_t& out) const
     // signal strength to report — so the error is the answer, not a problem.
     wifi_ap_record_t ap = {};
     if (esp_wifi_sta_get_ap_info(&ap) != ESP_OK) return false;
+    if (ap.rssi <= RssiUnknown) return false;
 
     out = ap.rssi;
     return true;
+}
+
+const char* WiFiInterface::AuthModeName(wifi_auth_mode_t mode)
+{
+    switch (mode)
+    {
+        case WIFI_AUTH_OPEN:                  return "open";
+        case WIFI_AUTH_WEP:                   return "WEP";
+        case WIFI_AUTH_WPA_PSK:               return "WPA";
+        case WIFI_AUTH_WPA2_PSK:              return "WPA2";
+        case WIFI_AUTH_WPA_WPA2_PSK:          return "WPA/WPA2";
+        case WIFI_AUTH_ENTERPRISE:            return "WPA2-ENT";
+        case WIFI_AUTH_WPA3_PSK:              return "WPA3";
+        case WIFI_AUTH_WPA2_WPA3_PSK:         return "WPA2/WPA3";
+        case WIFI_AUTH_WAPI_PSK:              return "WAPI";
+        case WIFI_AUTH_OWE:                   return "OWE";
+        case WIFI_AUTH_WPA3_ENT_192:          return "WPA3-ENT-192";
+        case WIFI_AUTH_DPP:                   return "DPP";
+        case WIFI_AUTH_WPA3_ENTERPRISE:       return "WPA3-ENT";
+        case WIFI_AUTH_WPA2_WPA3_ENTERPRISE:  return "WPA2/WPA3-ENT";
+        case WIFI_AUTH_WPA_ENTERPRISE:        return "WPA-ENT";
+        default:                              return "unknown";
+    }
 }
 
 int WiFiInterface::Scan(ScanResult* out, int maxResults)
@@ -184,6 +208,21 @@ int WiFiInterface::Scan(ScanResult* out, int maxResults)
         out[count].rssi = record.rssi;
         out[count].channel = record.primary;
         out[count].secure = record.authmode != WIFI_AUTH_OPEN;
+        out[count].authmode = record.authmode;
+
+        // One line per network, with the auth mode spelled out: a join that fails at
+        // full signal is a mode mismatch, and this is the line that says so. The
+        // signal reads "--" rather than a filler value when there is nothing to
+        // measure, because a wrong number here is worse than no number.
+        char signal[12];
+        if (record.rssi > RssiUnknown)
+            snprintf(signal, sizeof(signal), "%d dBm", record.rssi);
+        else
+            snprintf(signal, sizeof(signal), "-- dBm");
+        ESP_LOGI(TAG, "SCAN: '%s' ch%u %s auth=%s", out[count].ssid,
+                 static_cast<unsigned>(record.primary), signal,
+                 AuthModeName(record.authmode));
+
         count++;
     }
 

@@ -23,8 +23,18 @@ export default function LoginPage() {
     setError("")
     setLoading(true)
     try {
-      const ok = await backend.login(password)
-      if (!ok) setError("Invalid password")
+      const result = await backend.login(password)
+      if (!result.ok) {
+        // The device's own reason when it has one (a rate limit), because
+        // "Invalid password" for a password that is right is a bad hour.
+        setError(
+          result.error
+            ? result.retryAfter
+              ? `${result.error} (${result.retryAfter}s)`
+              : result.error
+            : "Invalid password",
+        )
+      }
     } catch {
       setError("Connection failed")
     } finally {

@@ -1,12 +1,5 @@
 import { useState, useEffect, useCallback } from "react"
-import type { Page } from "@/components/AppSidebar"
-
-const validPages: Page[] = [
-  "home",
-  "console",
-  "settings",
-  "firmware",
-]
+import { PAGES, type Page } from "@/components/AppSidebar"
 
 // The route lives in the HASH, not the path, and that is load-bearing rather
 // than a style choice: this UI is served from two mount points the build cannot
@@ -22,7 +15,7 @@ const validPages: Page[] = [
 // reason backend.ts knows nothing about a device id.
 function hashToPage(hash: string): Page {
   const segment = hash.replace(/^#\/?/, "").split("/")[0]?.toLowerCase()
-  if (segment && validPages.includes(segment as Page)) return segment as Page
+  if (segment && PAGES.includes(segment as Page)) return segment as Page
   return "home"
 }
 

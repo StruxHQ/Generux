@@ -1,0 +1,32 @@
+# ──────────────────────────────────────────────────────────────
+# Board overlay: ESP32 DevKit (generic ESP32-WROOM-32). Overlays the root
+# sdkconfig.defaults and wins on conflicts (composed in the root CMakeLists).
+#
+# This file is what makes the board a complete platform rather than a pinout:
+# the root defaults hold what the APPLICATION needs and assert nothing about
+# hardware, so everything below is this board's to state — even where the value
+# matches what ESP-IDF would have chosen anyway. An inherited default is a fact
+# nobody checked, and the drift guard can only verify what a file claims.
+#
+# The chip itself is NOT set here. IDF resolves IDF_TARGET in an early pass that
+# cannot see -DBOARD (the note in main/CMakeLists.txt), so a CONFIG_IDF_TARGET
+# line in this file is read too late and silently loses to whatever the existing
+# sdkconfig says. Select the chip the ordinary way:
+#   idf.py -DBOARD=esp32_devkit set-target esp32
+# ──────────────────────────────────────────────────────────────
+
+# ── Flash ──────────────────────────────────────────────────────
+# 4 MB at 80 MHz in DIO. DIO is also ESP-IDF's default for the ESP32 and is
+# written out anyway: a WROOM-32 module is quad-capable but the DevKit clones
+# this board stands for are not uniformly wired for it, and the mode a board
+# boots in should be readable in the board's own file rather than inferred from
+# the toolchain's defaults.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+
+# ── Partition table ────────────────────────────────────────────
+# This board's own, sized to the 4 MB above. The path is relative to the project
+# root, and the file sits beside this one so a board is one folder.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="main/hardware/boards/esp32_devkit/partitions.csv"

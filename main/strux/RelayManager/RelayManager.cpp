@@ -1,8 +1,10 @@
 #include "RelayManager.h"
 #include "SettingsManager.h"
 #include "NetworkManager.h"
-#include "WebServerManager.h"
+#include "ConsoleManager.h"
+#include "TelemetryManager.h"
 #include "CommandManager.h"
+#include "AuthManager.h"
 #include "AuthGate.h"
 #include "Authenticator.h"
 
@@ -41,7 +43,7 @@ void RelayManager::Init()
     strux_.getSettingsManager().Register(
         { &enabled_, &url_, &deviceId_setting_, &token_setting_ });
 
-    auth_ = &strux_.getWebServerManager().GetAuthenticator();
+    auth_ = &strux_.getAuthManager().GetAuthenticator();
 
     if (!enabled_.Get())
     {
@@ -147,7 +149,7 @@ void RelayManager::BuildUri()
     // IDENTITY ONLY. `id` is technical, is what the token proves, and is the address
     // in every relay URL — nothing else belongs in a string that is logged, proxied
     // and cached on the way. What this device is CALLED, what it runs and what it was
-    // built from go up as a hello on the socket instead (SendHello), where adding a
+    // built from are answered by `system info` on an ordinary channel, where adding a
     // fact costs a key rather than a query parameter, a percent-encoder and a bigger
     // buffer on both sides.
     const char* sep = strchr(url, '?') ? "&" : "?";
@@ -204,107 +206,6 @@ static bool AppendPair(char* out, size_t cap, const char* key, const char* value
     return true;
 }
 
-void RelayManager::SendHello()
-{
-    const esp_app_desc_t* app = esp_app_get_description();
-
-    char name[48] = {};
-    strux_.getSystemManager().GetDeviceName(name, sizeof(name));
-
-    char built[32] = {};
-    if (app) snprintf(built, sizeof(built), "%s %s", app->date, app->time);
-
-    // The address the device has on its OWN network, which is the only party that
-    // knows it. What the relay sees on the socket is wherever the connection came
-    // out — a NAT, and behind a reverse proxy its own docker-network peer — so the
-    // column it filled from that was showing 172.18.0.x for every device on the
-    // list. 16 bytes is "255.255.255.255" and its NUL.
-    char ip[16] = {};
-    strux_.getNetworkManager().GetIpv4(ip, sizeof(ip));
-
-    // Built in the outbound framing buffer rather than on the stack: this task's
-    // stack is sized for the heaviest command handler and must not also carry this.
-    // Safe to borrow — a hello goes out before any session exists on this pipe.
-    char* body = reinterpret_cast<char*>(sessionFrame_ + session::HEADER_LEN);
-    const size_t cap = sizeof(sessionFrame_) - session::HEADER_LEN;
-
-    // ── Everything this device tells the relay about itself ──────────────────
-    //
-    // The relay takes whatever keys arrive, so this table IS the contract: one row
-    // per key, the expression its value comes from, and whether this firmware
-    // considers it required. Adding a fact is a row and nothing else, on either side.
-    //
-    // `required` is the device's own statement, not the server's. It marks a key
-    // whose value this build can always produce, so an empty one is a bug HERE — a
-    // manager that did not initialise, an app descriptor that did not load — and it
-    // says so in the log rather than quietly shipping a device list entry that
-    // cannot be told apart from another board's. The hello still goes out: a partial
-    // one identifies the device better than none.
-    //
-    // An optional key that is empty is a fact this build does not have, not a
-    // failure. It is omitted entirely, and the relay shows a blank rather than the
-    // word "unknown".
-    struct HelloField
-    {
-        const char* key;
-        const char* value;
-        bool        required;
-    };
-
-    const HelloField fields[] = {
-        //  key         value                                required
-        //  ───────────────────────────────────────────────────────────────────────
-        {   "name",     name,                                true    },  // what a human calls this board; falls back to the project name
-        {   "project",  app ? app->project_name : nullptr,   true    },  // the firmware's identity — which product this is
-        {   "desc",     strux_.getSystemManager().GetDescription(),
-                                                             false   },  // one line saying what this product IS, registered by the
-                                                                         // application (DeviceDoc.h). Optional: a fork that has not
-                                                                         // written one yet is a device with no description, not a
-                                                                         // broken hello. The LONG form is not here, it is served by
-                                                                         // `system describe` -- a README does not belong in a chunk
-                                                                         // every reconnect re-sends.
-        {   "fw",       app ? app->version : nullptr,        true    },  // the git TAG (0.1.0), so two builds can share it
-        {   "commit",   STRUX_GIT_COMMIT,                    false   },  // short sha + "-dirty", which is what tells those two apart.
-                                                                         // Optional because a source drop with no .git is a legitimate
-                                                                         // way to build this, and it yields an empty string.
-        {   "idf",      app ? app->idf_ver : nullptr,        false   },  // ESP-IDF version the image was built against
-        {   "built",    built,                               false   },  // compile date and time, from esp_app_desc_t
-        {   "ip",       ip,                                  true    },  // this device's address on its own LAN. Required: the hello goes
-                                                                         // out over a socket that is already up, so an IPv4 exists by
-                                                                         // definition here, and an empty one is a bug in this firmware.
-    };
-
-    // `type` is for whoever reads a packet capture; the relay drops it, because the
-    // SESSION id is what actually names this chunk.
-    snprintf(body, cap, "{\"type\":\"relay hello\"");
-
-    // cap - 1 throughout: the closing brace below is reserved, so a pair can never
-    // fill the buffer and leave the JSON unterminated.
-    for (const HelloField& f : fields)
-    {
-        if (!f.value || f.value[0] == '\0')
-        {
-            if (f.required)
-                ESP_LOGW(TAG, "hello: required field '%s' is empty", f.key);
-            continue;
-        }
-
-        if (!AppendPair(body, cap - 1, f.key, f.value))
-            ESP_LOGW(TAG, "hello: '%s' does not fit — it is omitted", f.key);
-    }
-
-    strlcat(body, "}", cap);
-
-    const size_t len = strlen(body);
-    session::writeHeader(sessionFrame_, session::HELLO_SESSION, session::FLAG_FINAL);
-
-    // Best effort, and deliberately not retried: nothing is waiting on it, and a pipe
-    // that cannot carry 200 bytes is about to fail on its own and reconnect — which
-    // sends the hello again. The cost of a lost one is a device list missing a name
-    // until then.
-    if (!socket_.SendBinary(sessionFrame_, session::HEADER_LEN + len, HELLO_SEND_TIMEOUT_MS))
-        ESP_LOGW(TAG, "could not send hello");
-}
 
 // ──────────────────────────────────────────────────────────
 // The pipe: connect, read, dispatch, repeat
@@ -354,10 +255,15 @@ void RelayManager::TaskLoop()
             reconnectDelayMs_   = RECONNECT_DELAY_MS;
 
             OnConnected();
-            // Before anything else on this pipe, and on every reconnect rather than
-            // once: the relay holds what a device said per connection, and a board
-            // that was reflashed while away is a board whose answers changed.
-            SendHello();
+            // Before anything else on this pipe: both peers send their handshake
+            // unprompted, so neither leads and the same code works on a transport
+            // with no dialer. What this device IS used to go out here as a hello on
+            // a reserved channel; it is an ordinary `system info` command now, which
+            // the relay calls once the connection is READY.
+            {
+                RelayTransport link(socket_, INBOUND_WINDOW);
+                protocol::SendHandshake(conn_.conn, link);
+            }
             // Right after connect, because on a wss:// pipe the TLS handshake just
             // ran on this stack and is one of the two things it has to fit.
             CheckStackHeadroom();
@@ -366,13 +272,30 @@ void RelayManager::TaskLoop()
 
         // Between requests this is where the task sits — blocked until a frame arrives
         // or the next keepalive comes due, whichever happens first. Mid-request the
-        // same read happens under the session, one layer down (RelaySessionLink) —
+        // same read happens under the channel, one layer down (RelayTransport) —
         // same socket, same task, which is the property that removed the queue.
+        // Between requests is the only safe point: mid-request this task is inside
+        // a handler that owns the socket, which is v1's accepted head-of-line
+        // blocking. A long upload delays logs; it does not lose them.
+        OpenStreams();
+        DrainConsole();
+        DrainTelemetry();
+
         int32_t untilPing = static_cast<int32_t>(nextPingAt - NowMs());
         if (untilPing < 0) untilPing = 0;
 
-        const int n = socket_.ReadFrame(sessionInbound_, sizeof(sessionInbound_),
+        const int n = socket_.ReadFrame(channelInbound_, sizeof(channelInbound_),
                                         untilPing);
+        if (n == RelaySocket::READ_TOO_LONG)
+        {
+            // The relay framed more than this link takes in one chunk. The message
+            // has been read to its end and discarded, so the pipe is still in sync
+            // -- and the channel id went with the bytes, so there is nothing to
+            // refuse by name. Saying so and carrying on beats dropping every other
+            // channel on the pipe, which is what this used to do.
+            ESP_LOGW(TAG, "oversized inbound chunk discarded - pipe kept");
+            continue;
+        }
         if (n < 0)
         {
             OnDisconnected();
@@ -393,9 +316,9 @@ void RelayManager::TaskLoop()
             continue;
         }
 
-        HandleFrame(sessionInbound_, static_cast<size_t>(n));
+        HandleFrame(channelInbound_, static_cast<size_t>(n));
 
-        // After the request rather than before it: a session that took a while has
+        // After the request rather than before it: a channel that took a while has
         // just proven the pipe alive, and the next keepalive is owed from here.
         nextPingAt = NowMs() + PING_INTERVAL_MS;
     }
@@ -403,7 +326,7 @@ void RelayManager::TaskLoop()
 
 void RelayManager::OnConnected()
 {
-    // A reconnect is a fresh pipe: drop the old session state.
+    // A reconnect is a fresh pipe: drop the old channel state.
     conn_.reset();
     conn_.fd = -1;   // "slot in use" — there is no socket fd on this transport
 
@@ -420,7 +343,10 @@ void RelayManager::OnConnected()
     // even the login page that would have unlocked it.
     conn_.authed = true;
 
-    skipping_ = false;
+    // A fresh pipe knows no channels and has not handshaken. The cursor starts at
+    // the tip because a reconnect is not a reason to replay.
+    conn_.conn.Reset();
+    conn_.conn.logCursor = strux_.getConsoleManager().Tip();
     linkUp_ = true;
 
     // Says WHY the pipe is open, which is no longer "nobody set a password": this
@@ -473,7 +399,6 @@ int RelayManager::ReportConnectFailure(RelaySocket::ConnectResult result)
 void RelayManager::OnDisconnected()
 {
     linkUp_ = false;
-    skipping_ = false;
     socket_.Close();
 
     // Nothing to unblock: a handler waiting for its next chunk is waiting on a read
@@ -484,49 +409,40 @@ void RelayManager::OnDisconnected()
 
 void RelayManager::HandleFrame(const uint8_t* frame, size_t len)
 {
-    if (len < session::HEADER_LEN) return;
+    if (len < channel::HEADER_LEN) return;
 
-    uint16_t sid   = session::readU16(frame);
+    uint16_t id    = channel::readU16(frame);
     uint8_t  flags = frame[2];
-    const uint8_t* payload = frame + session::HEADER_LEN;
-    size_t plen = len - session::HEADER_LEN;
-    const bool final = (flags & session::FLAG_FINAL) != 0;
-
-    // Residue: the tail of a request whose handler already returned. Read as a fresh
-    // chunk it would be taken for a request header, and a command invented out of
-    // firmware bytes. Skipped by id, so an unrelated session is never caught in it.
-    if (skipping_)
-    {
-        if (sid == skipSid_)
-        {
-            if (final)
-            {
-                skipping_ = false;
-                ESP_LOGW(TAG, "session %u: skipped to the end of an abandoned body",
-                         static_cast<unsigned>(sid));
-            }
-            return;
-        }
-        skipping_ = false;   // a different session: whatever was left is behind us
-    }
+    const uint8_t* payload = frame + channel::HEADER_LEN;
+    size_t plen = len - channel::HEADER_LEN;
 
     // Identical to the local transport's frame path (WebSocketHandler::HandleBinary),
-    // because everything above SessionLink is shared: the gate says what may run yet,
-    // the chunk becomes a Session, and CommandManager runs the command.
-    RelaySessionLink link(socket_);
+    // because everything above Transport is shared: the Connection decides what this
+    // frame is, the gate says what may run yet, and CommandManager runs the command.
+    //
+    // The residue skip that used to live here is gone with it. It was this transport's
+    // own workaround for having no channel table -- the tail of a request whose handler
+    // returned early, which read as a fresh chunk would be taken for a request header
+    // and invent a command out of firmware bytes. The table knows the id is draining,
+    // so the frames are dropped by lookup rather than by a mode flag, and the local
+    // WebSocket -- which never had the workaround, and therefore had the bug -- gets
+    // the same handling from the same code.
+    RelayTransport link(socket_, INBOUND_WINDOW);
     AuthGate gate(conn_, *auth_);
 
-    Session s(sid, link, sessionFrame_, SESSION_WINDOW,
-              sessionInbound_, sizeof(sessionInbound_));
-    s.feedRequest(payload, plen, final);
-    protocol::RunCommandSession(s, strux_.getCommandManager(), gate);
+    protocol::Connection<CommandManager, AuthGate> connection(
+        conn_.conn, link, strux_.getCommandManager(), gate,
+        channelFrame_, CHANNEL_WINDOW,
+        channelInbound_, sizeof(channelInbound_));
+    connection.OnFrame(id, flags, payload, plen);
 
-    // Returned without reaching FINAL — a refusal, or a handler that read less than
-    // was sent. The rest is still coming down the socket.
-    if (!s.requestEnded() && socket_.IsConnected())
+    if (conn_.conn.phase == ConnectionState::Phase::Failed)
     {
-        skipSid_  = sid;
-        skipping_ = true;
+        // A version the relay does not share, or nonces that would not settle.
+        // Nothing on this pipe can be understood, so drop it and let the reconnect
+        // loop try again.
+        ESP_LOGE(TAG, "handshake failed - dropping the pipe");
+        OnDisconnected();
     }
 
     // The handler just ran on this stack; if it was the deepest one yet, say so.
@@ -551,49 +467,84 @@ void RelayManager::CheckStackHeadroom()
 }
 
 // ──────────────────────────────────────────────────────────────
-// Log fan-out
+// Passive streams
+//
+// Both are drained from the read loop, between requests, which is the whole change:
+// the console task and whichever task took a measurement used to call in here and
+// block on RelaySocket::sendMutex_. Every LOCK() is under ContextLock, so a stalled
+// TLS write turned three producers into a reboot. Now one task writes this socket.
+//
+// Neither drain logs on failure. A line raised here would be stored, drained, sent,
+// fail, and log again; ConsoleManager::DrainScope covers the lines this code causes
+// further down the stack, and saying nothing ourselves covers the rest.
 // ──────────────────────────────────────────────────────────────
 
-void RelayManager::BroadcastLog(const char* json, int len)
+void RelayManager::OpenStreams()
 {
-    if (!linkUp_) return;
+    if (!linkUp_ || conn_.conn.phase != ConnectionState::Phase::Ready) return;
 
-    // Same session-0 chunk the local socket broadcasts. This runs on the console
-    // task, so it can collide with a session's reply on the relay task —
-    // RelaySocket's send lock is what keeps a frame from being split in half.
-    uint8_t buf[session::HEADER_LEN + 256];
-    int cap = static_cast<int>(sizeof(buf) - session::HEADER_LEN);
-    if (len > cap) len = cap;
-    if (len < 0) return;
+    RelayTransport link(socket_, INBOUND_WINDOW);
 
-    session::writeHeader(buf, session::BROADCAST_SESSION, session::FLAG_FINAL);
-    memcpy(buf + session::HEADER_LEN, json, static_cast<size_t>(len));
+    if (conn_.conn.logChannel < 0)
+        protocol::OpenPassiveChannel(conn_.conn, link, protocol::LOG_STREAM_ENVELOPE,
+                                     conn_.conn.logChannel);
 
-    // Short timeout and no logging on failure — this runs on the console
-    // broadcast task, and a log line here would feed itself.
-    socket_.SendBinary(buf, session::HEADER_LEN + static_cast<size_t>(len),
-                       BROADCAST_TIMEOUT_MS);
+    if (conn_.conn.telemetryChannel < 0 && strux_.getTelemetryManager().IsEnabled())
+        protocol::OpenPassiveChannel(conn_.conn, link, protocol::TELEMETRY_STREAM_ENVELOPE,
+                                     conn_.conn.telemetryChannel);
 }
 
-bool RelayManager::BroadcastTelemetry(const char* line, int len)
+void RelayManager::DrainConsole()
 {
-    if (!linkUp_) return false;
-    if (len <= 0) return false;
+    if (!linkUp_ || conn_.conn.logChannel < 0) return;
 
-    // Sized for one line, which TelemetryManager already bounded. A point that does
-    // not fit here would be a formatting bug there, so it is refused rather than cut.
-    uint8_t buf[session::HEADER_LEN + 384];
-    if (static_cast<size_t>(len) > sizeof(buf) - session::HEADER_LEN)
+    const uint16_t id = static_cast<uint16_t>(conn_.conn.logChannel);
+    auto& console = strux_.getConsoleManager();
+    ConsoleManager::DrainScope guard(console);
+
+    char json[ConsoleManager::JSON_CAP];
+    uint8_t frame[channel::HEADER_LEN + ConsoleManager::JSON_CAP];
+
+    // No FINAL: this direction stays open for the life of the connection, and the
+    // peer ends it with RESET when it stops wanting logs.
+    while (size_t n = console.ReadJson(conn_.conn.logCursor, json, sizeof(json)))
     {
-        ESP_LOGW(TAG, "telemetry line too long (%d) - dropped", len);
-        return false;
+        channel::writeHeader(frame, id, 0);
+        memcpy(frame + channel::HEADER_LEN, json, n);
+        if (!socket_.SendBinary(frame, channel::HEADER_LEN + n, BROADCAST_TIMEOUT_MS))
+            return;
     }
+}
 
-    session::writeHeader(buf, session::TELEMETRY_SESSION, session::FLAG_FINAL);
-    memcpy(buf + session::HEADER_LEN, line, static_cast<size_t>(len));
+void RelayManager::DrainTelemetry()
+{
+    if (!linkUp_ || conn_.conn.telemetryChannel < 0) return;
 
-    // Same send lock as everything else on this socket: this is called from whichever
-    // task took the measurement, which is not the relay task.
-    return socket_.SendBinary(buf, session::HEADER_LEN + static_cast<size_t>(len),
-                              BROADCAST_TIMEOUT_MS);
+    const uint16_t id = static_cast<uint16_t>(conn_.conn.telemetryChannel);
+    auto& telemetry = strux_.getTelemetryManager();
+    if (!telemetry.IsEnabled()) return;
+
+    char batch[TELEMETRY_BATCH];
+    uint8_t frame[channel::HEADER_LEN + TELEMETRY_BATCH];
+
+    for (;;)
+    {
+        uint32_t lines = 0;
+        const size_t n = telemetry.Drain(batch, sizeof(batch), lines);
+        if (n == 0) return;
+
+        channel::writeHeader(frame, id, 0);
+        memcpy(frame + channel::HEADER_LEN, batch, n);
+
+        if (socket_.SendBinary(frame, channel::HEADER_LEN + n, BROADCAST_TIMEOUT_MS))
+            telemetry.ReportSent(lines);
+        else
+        {
+            // Drain is destructive, so a failed batch is gone. Counted rather than
+            // requeued: telemetry is explicitly lossy, and a retry queue is the
+            // thing this ring exists to avoid.
+            telemetry.ReportDropped(lines);
+            return;
+        }
+    }
 }

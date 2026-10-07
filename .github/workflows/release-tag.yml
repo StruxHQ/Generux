@@ -1,0 +1,111 @@
+name: Release tag
+
+# The two human steps of a release, as buttons (Actions -> Release tag -> Run workflow):
+#
+#   candidate  1.2.0   tags the tip of `dev` as the next v1.2.0-rc.N
+#   final      1.2.0   promotes the LATEST v1.2.0-rc.N: tags that same commit v1.2.0
+#                      and moves `main` to it, in one atomic push
+#
+# Branches and tags:  agent/issue-* --squash--> dev --tag--> v1.2.0-rc.N --same commit--> v1.2.0 = main
+#
+# Invariant: main == the commit of the latest final vX.Y.Z tag. Two rulesets enforce
+# it: nobody may update or delete `main` or create, move or delete a `v*` tag --
+# except the release deploy key. Its private half is the RELEASE_DEPLOY_KEY secret of
+# the `release` ENVIRONMENT, which only `main` may deploy from: a workflow on any
+# other branch -- including a copy of this file -- cannot read the key. main itself
+# only changes through this workflow, so the file that holds the key is the one
+# that was released. Pushes made with a deploy key DO start
+# workflows, so release.yml runs on the tag this pushes.
+#
+# Because the deploy key bypasses main's required checks, this workflow checks CI
+# itself: the CI run for a push of that exact commit must have succeeded. A final
+# release ships the RC's binaries without rebuilding (see release.yml), so the RC
+# must have a published release with the full set of files first. Every check fails
+# closed. An RC that needs fixing is never patched: the fix goes through dev, and
+# the next candidate is rc.N+1.
+
+on:
+  workflow_dispatch:
+    inputs:
+      kind:
+        description: "candidate = tag dev as the next RC; final = promote the latest RC"
+        type: choice
+        options: [candidate, final]
+        required: true
+      version:
+        description: "Version without the v, e.g. 1.2.0"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+# One run at a time, so two candidates cannot both pick rc.N. (A tag that exists
+# is refused by the remote anyway; this keeps the second run from even trying.)
+concurrency:
+  group: release-tag
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    if: github.ref == 'refs/heads/main'
+    environment: release
+    runs-on: ubuntu-latest
+    steps:
+      # A checkout of MAIN (the ref this runs from), never of dev: nothing from an
+      # unreleased branch is executed while the key is in the git config. dev is
+      # only read as data (origin/dev, tags).
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ssh-key: ${{ secrets.RELEASE_DEPLOY_KEY }}
+
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KIND: ${{ inputs.kind }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          R=$GITHUB_REPOSITORY
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::Version must look like 1.2.0"; exit 1; }
+          final="v$VERSION"
+          git rev-parse -q --verify "refs/tags/$final" >/dev/null && { echo "::error::$final is already released"; exit 1; }
+          git config user.name "strux-release"; git config user.email "noreply@anthropic.com"
+          last_rc=$(git tag -l "$final-rc.*" | grep -E -- '-rc\.[0-9]+$' | sort -V | tail -n1 || true)
+
+          ci_green() {  # the CI run for a push of exactly this commit succeeded
+            local n
+            n=$(gh api "repos/$R/actions/workflows/ci.yml/runs?head_sha=$1&event=push" \
+                  --jq '[.workflow_runs[] | select(.conclusion == "success")] | length')
+            [ "$n" -gt 0 ] || { echo "::error::CI has not passed on ${1:0:10} (still running, failed, or never ran)"; exit 1; }
+          }
+
+          if [ "$KIND" = candidate ]; then
+            commit=$(git rev-parse origin/dev)
+            already=$(git tag --points-at "$commit" | grep -E -- '-rc\.[0-9]+$' || true)
+            [ -z "$already" ] || { echo "::error::dev has nothing new since $already"; exit 1; }
+            ci_green "$commit"
+            n=0; [ -z "$last_rc" ] || n=${last_rc##*-rc.}
+            tag="$final-rc.$((n + 1))"
+            git tag -a "$tag" -m "$tag" "$commit"
+            git push origin "refs/tags/$tag"
+          else
+            [ -n "$last_rc" ] || { echo "::error::No release candidate for $final yet"; exit 1; }
+            commit=$(git rev-parse "$last_rc^{commit}")
+            echo "Promoting $last_rc (${commit:0:10})"
+
+            # The RC must be a PUBLISHED release with the full file set: the final
+            # release ships those files, it does not build its own.
+            bash .github/agent/release-assets.sh "$last_rc"
+
+            ci_green "$commit"
+            git merge-base --is-ancestor origin/main "$commit" \
+              || { echo "::error::main is not an ancestor of $last_rc, so it cannot fast-forward"; exit 1; }
+
+            # main and the final tag move together or not at all.
+            tag=$final
+            git tag -a "$tag" -m "$tag (promoted from $last_rc)" "$commit"
+            git push --atomic origin "$commit:refs/heads/main" "refs/tags/$tag"
+          fi
+          echo "### Tagged \`$tag\` at \`${commit:0:10}\`" >> "$GITHUB_STEP_SUMMARY"

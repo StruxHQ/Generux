@@ -1,7 +1,6 @@
 #include "SettingsManager.h"
 #include "CommandManager.h"
 #include "ContextLock.h"
-#include "JsonReader.h"
 #include "esp_log.h"
 #include "esp_memory_utils.h"
 #include "nvs_flash.h"
@@ -18,6 +17,44 @@ SettingsManager::SettingsManager(StruxProvider& strux)
 {
 }
 
+namespace {
+
+constexpr CommandArg<const char*> keyArg{
+    "key", "The setting's dotted key exactly as 'settings list' reports it, "
+           "e.g. 'relay.url' or 'led.enabled'.",
+    63 };
+
+// A string whatever the setting's type is: which conversion applies is not known
+// until `key` has been resolved, so the handler does it. A typed declaration here
+// would have to be one type for every setting, which is the thing it cannot be.
+constexpr CommandArg<const char*> valueArg{
+    "value", "The new value as text: numbers in decimal, booleans as 'true' or "
+             "'false'. Omit it to clear the setting to an empty value.",
+    127, Presence::Optional };
+
+} // namespace
+
+CommandEntry SettingsManager::listCommand_{
+    "settings list", &InvokeCommand<&SettingsManager::Cmd_GetSettings>,
+    "List every setting registered on this device with its key, label, type "
+    "and current value. This is the whole configuration surface. A setting may "
+    "carry 'hidden' or 'secret' as hints for whatever displays it; the value is "
+    "reported either way."
+};
+
+CommandEntry SettingsManager::setCommand_{
+    "settings set", &InvokeCommand<&SettingsManager::Cmd_SetSetting>,
+    "Change one setting's value in RAM. NOT durable on its own: call "
+    "'settings save' afterwards or the change is lost at the next reboot.",
+    { &keyArg, &valueArg }
+};
+
+CommandEntry SettingsManager::saveCommand_{
+    "settings save", &InvokeCommand<&SettingsManager::Cmd_SaveSettings>,
+    "Commit every setting changed with 'settings set' to NVS so they survive "
+    "a reboot. Several settings only take effect after one."
+};
+
 void SettingsManager::Init()
 {
     auto initAttempt = initState_.TryBeginInit();
@@ -29,7 +66,11 @@ void SettingsManager::Init()
 
     // Registered before the NVS work so the commands exist even if NVS
     // fails to open (getSettings then reports defaults).
-    strux_.getCommandManager().Register(this, commands_);
+    strux_.getCommandManager().Register(this, {
+        &listCommand_,
+        &setCommand_,
+        &saveCommand_,
+    });
 
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND)
@@ -184,10 +225,8 @@ bool SettingsManager::WriteString(const char* key, const char* v)
 // knows nothing about JSON. Anyone wanting YAML writes their own.
 // ──────────────────────────────────────────────────────────────
 
-RequestError SettingsManager::Cmd_GetSettings(CommandContext& ctx)
+CommandResult SettingsManager::Cmd_GetSettings(CommandContext& ctx)
 {
-    RETURN_IF_ERROR(ctx.readArgs());
-
     auto root     = ctx.reply.object();
     auto settings = root.array("settings");
 
@@ -197,6 +236,8 @@ RequestError SettingsManager::Cmd_GetSettings(CommandContext& ctx)
         o.field("key", s.key);
         o.field("label", s.label);
         o.field("type", SettingTypeToString(s.type));
+        if (s.flags & SettingFlags::Hidden) o.field("hidden", true);
+        if (s.flags & SettingFlags::Secret) o.field("secret", true);
 
         switch (s.type)   // NO default → new SettingType values must be handled here
         {
@@ -213,21 +254,13 @@ RequestError SettingsManager::Cmd_GetSettings(CommandContext& ctx)
         }
         }
     }   // each `o` closes at end of iteration; `settings` and `root` at return
-    return RequestError::Ok;
+    return CommandResult::Ok;
 }
 
-RequestError SettingsManager::Cmd_SetSetting(CommandContext& ctx)
+CommandResult SettingsManager::Cmd_SetSetting(CommandContext& ctx)
 {
-    char key[64] = {};
-    char value[128] = {};
-    RETURN_IF_ERROR(ctx.readArgs(
-        Required("key",   key,
-                 "The setting's dotted key exactly as 'settings list' reports it, "
-                 "e.g. 'relay.url' or 'led.enabled'."),
-        Optional("value", value,
-                 "The new value as text: numbers in decimal, booleans as 'true' or "
-                 "'false'. Omit it to clear the setting to an empty value.")
-    ));
+    const char* key   = ctx.arg(keyArg);
+    const char* value = ctx.arg(valueArg);
 
     auto resp = ctx.reply.object();
 
@@ -257,21 +290,19 @@ RequestError SettingsManager::Cmd_SetSetting(CommandContext& ctx)
         }
 
         resp.field("ok", ok);
-        return RequestError::Ok;
+        return CommandResult::Ok;
     }
 
     // An unrecognised setting key is MEANING, not form — the framework has no idea
     // which keys exist. So it is a reply, not a refusal.
     resp.field("ok", false);
     resp.field("error", "unknown key");
-    return RequestError::Ok;
+    return CommandResult::Ok;
 }
 
-RequestError SettingsManager::Cmd_SaveSettings(CommandContext& ctx)
+CommandResult SettingsManager::Cmd_SaveSettings(CommandContext& ctx)
 {
-    RETURN_IF_ERROR(ctx.readArgs());
-
     auto resp = ctx.reply.object();
     resp.field("ok", Save());
-    return RequestError::Ok;
+    return CommandResult::Ok;
 }

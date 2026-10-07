@@ -77,23 +77,14 @@ private:
     const char* instructions_ = nullptr;
 
     // ── WebSocket commands (registered with CommandManager in Init) ──
-    RequestError Cmd_Ping(CommandContext& ctx);
-    RequestError Cmd_Info(CommandContext& ctx);
-    RequestError Cmd_Reboot(CommandContext& ctx);
-    RequestError Cmd_Describe(CommandContext& ctx);
+    CommandResult Cmd_Ping(CommandContext& ctx);
+    CommandResult Cmd_Info(CommandContext& ctx);
+    CommandResult Cmd_Reboot(CommandContext& ctx);
+    CommandResult Cmd_Describe(CommandContext& ctx);
 
-    inline static CommandEntry commands_[] = {
-        { "system", "ping",   &InvokeCommand<&SystemManager::Cmd_Ping>,
-          "Check the device is answering. Takes nothing, returns {\"pong\":true}." },
-        { "system", "info",   &InvokeCommand<&SystemManager::Cmd_Info>,
-          "Report this device's runtime state: name, firmware build, chip, clock, IP "
-          "address, free heap and the device's own clock." },
-        { "system", "reboot", &InvokeCommand<&SystemManager::Cmd_Reboot>,
-          "Restart the device. The reply is written first, then the device restarts "
-          "about half a second later and every connection drops." },
-        { "system", "describe", &InvokeCommand<&SystemManager::Cmd_Describe>,
-          "What this device IS: its name, firmware, one-line description and its "
-          "full instructions - how it is meant to be driven. Pair it with "
-          "'help describe', which is the same question about the commands." },
-    };
+    // Defined in SystemManager.cpp, beside the handlers.
+    static CommandEntry pingCommand_;
+    static CommandEntry infoCommand_;
+    static CommandEntry rebootCommand_;
+    static CommandEntry describeCommand_;
 };

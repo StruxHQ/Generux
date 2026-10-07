@@ -1,4 +1,4 @@
-import { cn } from "@/lib/utils"
+import { cn } from "cn"
 
 const DIVS_X = 10
 const DIVS_Y = 8

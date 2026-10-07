@@ -1,0 +1,25 @@
+# ESP-IDF Partition Table — ESP32-C3 SuperMini (ESP32-C3FH4/FN4, 4 MB flash)
+#
+# This board's layout, not the project's. The application asks only for nvs,
+# otadata, phy_init and two app slots; how big they are is a property of this
+# flash, which is why the file lives here and the board's sdkconfig.defaults
+# names it.
+#
+# Identical to the DevKit's today because both boards carry 4 MB, and that is a
+# coincidence of the hardware rather than something shared: a board with other
+# flash writes other numbers here and touches nothing outside its own folder.
+# Do NOT consolidate the two copies into one shared file — that reintroduces a
+# shared default asserting one board's hardware. See
+# docs/reasoning/2026-09-22-09h25-a-shared-default-that-asserts-a-hardware-fact-compares-one-board-against-another.md
+#
+# No www partition: the built frontend is packed into one blob and linked into
+# the app image (main/strux/WebAssets/), so a firmware image is the whole product
+# and the space the FAT image used is back in the two OTA slots. The slots fill
+# the 4 MB flash exactly.
+#
+# Name,     Type,   SubType,    Offset,     Size,       Flags
+nvs,        data,   nvs,        0x9000,     0x6000,
+otadata,    data,   ota,        0xf000,     0x2000,
+phy_init,   data,   phy,        0x11000,    0x1000,
+ota_0,      app,    ota_0,      0x20000,    0x1F0000,
+ota_1,      app,    ota_1,      0x210000,   0x1F0000,

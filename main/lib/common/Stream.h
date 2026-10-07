@@ -24,7 +24,7 @@ public:
     // on the heap (fragmentation, and an allocation that can fail mid-write).
     //
     // Both directions are one capability, because the one stream that has it — a
-    // session over a transport's framing buffers — has it both ways.
+    // channel over a transport's framing buffers — has it both ways.
 
     /// Does this stream lend its buffers? Asked once, up front: afterwards "nothing
     /// to lend" and "nothing left" both come back as zero, and a handler must not

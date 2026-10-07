@@ -8,8 +8,11 @@
 #include <cstring>
 #include <cassert>
 #include <cstddef>
+#include <initializer_list>
 
 class Stream;
+class Envelope;
+class ReplyWriter;
 
 // Pure dispatcher — knows no other managers, and no commands but the
 // registry's own (`help`, which is the registry describing itself and
@@ -17,12 +20,14 @@ class Stream;
 // manager that owns its domain and is registered from that manager's
 // Init().
 //
-// Deliberately knows nothing about sessions, transports or the wire format: give
-// it a command name and two streams and it runs the handler. That is what keeps it
-// the one piece of the request path that can be reasoned about on its own.
+// Deliberately knows nothing about channels, transports or the wire format: give
+// it an envelope, a reply writer and a stream and it runs the handler. It asks the
+// envelope for a name and for a decode against the command's declarations, so no
+// codec's syntax is visible from here — JSON and the console line reach this same
+// function and leave through the same ReplyWriter.
 //
-// Naming a request from its envelope is the protocol layer's job — see
-// protocol::RunCommandSession, which every transport calls.
+// Reading a request's envelope is the protocol layer's job — see
+// protocol::RunCommandChannel, which every transport calls.
 class CommandManager {
     static constexpr const char* TAG = "CommandManager";
 
@@ -36,49 +41,59 @@ public:
 
     void Init();
 
-    /// Register a table of commands. `commands` MUST have static storage
-    /// duration (see ~CommandEntry). `ctx` (usually the owner's `this`) is
-    /// stamped into every entry and handed back to its handler at dispatch.
+    /// Register this manager's commands. Each one is an object the manager owns
+    /// and names; nothing is generated, nothing registers itself, and the list is
+    /// the manager saying which of its commands exist:
+    ///
+    ///     strux_.getCommandManager().Register(this, { &pingCommand_, &infoCommand_ });
+    ///
+    /// Every entry MUST have static storage duration (see ~CommandEntry). `ctx` is
+    /// the owner's `this`, stamped into each entry and handed back to its handler at
+    /// dispatch — it cannot come from the entry itself, because an entry is
+    /// initialised before any manager exists.
     ///
     /// Thread-safe, and usable from construction — managers whose Init()
     /// runs before CommandManager's may register safely.
-    template <size_t N>
-    void Register(void* ctx, CommandEntry (&commands)[N])
+    void Register(void* ctx, std::initializer_list<CommandEntry*> commands)
     {
         LOCK(mutex_);
-        for (size_t i = 0; i < N; ++i)
+        for (CommandEntry* c : commands)
         {
             // Re-registering would re-link an entry already in the chain
             // and cycle it → Execute() would hang. Chain-corruption class,
             // so FATAL (survives NDEBUG), not assert.
-            if (commands[i].registered)
-                FATAL("command '%s %s' registered twice",
-                      commands[i].category, commands[i].name);
-            assert(Find(commands[i].category, commands[i].name) == nullptr &&
-                   "duplicate command name");
+            if (c->registered)
+                FATAL("command '%s' registered twice", c->name);
+            assert(Find(c->name) == nullptr && "duplicate command name");
+            // The declaration list is null-terminated and the last slot is the
+            // terminator's. A list that fills it would be walked off the end.
+            if (c->args[MAX_COMMAND_ARGS] != nullptr)
+                FATAL("command '%s' declares more than %d arguments",
+                      c->name, (int)MAX_COMMAND_ARGS);
 
-            commands[i].ctx = ctx;
-            commands[i].registered = true;
-            commands[i].next = head_;
-            head_ = &commands[i];
+            c->ctx = ctx;
+            c->registered = true;
+            c->next = head_;
+            head_ = c;
         }
     }
 
-    /// Execute a command by type name. `in` carries the request payload;
-    /// the handler writes its complete reply (e.g. one JSON object) to
-    /// `out`. The caller owns any transport envelope around it.
+    /// Run the command the envelope names. `in` is positioned at the request body
+    /// (empty for most commands) and the handler writes its reply through `reply`.
     ///
-    /// Returns Ok, UnknownCommand, or whatever a failed argument pull reported.
-    /// `failedArg` (when non-null) receives the argument name a pull was looking
-    /// for, so the caller can compose the refusal text.
+    /// BOTH halves arrive already chosen, because both belong to the codec that
+    /// carried the request and this class has no way to know which that was. The
+    /// envelope was read by the interface — reading it is what leaves `in` at the
+    /// body — and is asked to decode this command's declared arguments; the writer
+    /// is that same codec's. Nothing here names a wire format, and adding a second
+    /// one changed neither this signature's meaning nor a single handler.
     ///
-    /// Whether the request has already been read depends on the handler's shape:
-    /// an argument-pulling handler gets its envelope consumed by the framework
-    /// first, an unconverted one still parses `in` itself. See CommandEntry.
-    RequestError Execute(const char* category, const char* name,
-                         Stream& in, Stream& out,
-                         ConnectionAuth* connection = nullptr,
-                         const char** failedArg = nullptr);
+    /// Returns Ok, UnknownCommand, or whatever the decode reported. `failedArg` (when
+    /// non-null) receives the argument name a failure was about, so the caller can
+    /// compose the refusal text.
+    CommandResult Execute(Envelope& envelope, ReplyWriter& reply, Stream& in,
+                          ConnectionAuth* connection = nullptr,
+                          const char** failedArg = nullptr);
 
 private:
     StruxProvider& strux_;
@@ -90,58 +105,29 @@ private:
     // Locks internally (recursive, so Register may call it under its own
     // lock). Handing the pointer out after unlock is safe because entries
     // are immortal and name/handler/ctx are written before linking.
-    const CommandEntry* Find(const char* category, const char* name);
+    const CommandEntry* Find(const char* name);
 
-    // ── help: the registry describing itself ──────────────────
+    // ── help: the registry describing itself ────────────────
     //
-    // Nothing here is a second copy of anything. The categories and names come off
-    // the chain; a command's arguments come from the command, by re-dispatching it
-    // with a reader that prints the declarations instead of filling them (see
-    // DescribeArgReader). So help cannot go stale — there is nothing to update.
+    // ONE command and ONE reply: every command this firmware has, with its
+    // description and its full argument declarations. A caller that has to compose
+    // a call - a person exploring, the command console in the browser, a model at
+    // the other end of the relay - knows everything after one round trip.
     //
-    //     help list                                    → every category and its commands
-    //     help list -category partition                → one category's commands
-    //     help list -category partition -command write → that command's arguments
-    RequestError Cmd_Help(CommandContext& ctx);
-
-    // ── help describe: the whole registry, in one reply ───────
+    // Nothing here is a second copy of anything. The names come off the chain; a
+    // command's arguments come off its own entry, where the handler reads them from.
+    // So help cannot go stale - there is nothing to update - and nothing is executed
+    // to find out, which is what makes `system reboot` safe to ask about.
     //
-    // What `help list` gives a human exploring, given instead to something that has
-    // to compose a call without asking again: every category, every command, its
-    // one-line description and its full argument declarations, in one round trip.
-    //
-    // The same facts as walking `help list` N+1 times, and deliberately the same
-    // MECHANISM — the chain for the routes, the handler itself for the arguments —
-    // so there is still nothing to keep in step. What it saves is a round trip per
-    // command, which over a relay pipe is the difference between describing a device
-    // once and describing it twenty times.
-    RequestError Cmd_Describe(CommandContext& ctx);
+    // The list is FLAT, and the reply says nothing about categories. The first word
+    // of a name still groups, for a reader and for AuthGate, but that is a question
+    // asked ABOUT a command rather than part of what it is called - so the registry
+    // reports what a command IS and leaves the grouping to whoever wants one.
+    CommandResult Cmd_Help(CommandContext& ctx);
 
-    static constexpr size_t MAX_ROUTE = 32;        // matches protocol::MAX_COMMAND_NAME
-    static constexpr size_t MAX_CATEGORIES = 24;
+    /// Writes one command's declared arguments into `args`, straight off its entry.
+    void DescribeArguments(const CommandEntry& entry, ReplyArray& args);
 
-    void ListCategories(ReplyWriter& reply);
-    void ListCategory(const char* category, ReplyWriter& reply);
-    RequestError DescribeCommand(const char* category, const char* command,
-                                 ReplyWriter& reply);
-
-    /// Writes one command's declared arguments into `args`, by re-dispatching it with
-    /// a reader that prints declarations instead of filling them. Returns false when
-    /// the handler never asked for its arguments — which means its body ran, and is
-    /// the caller's cue to say so.
-    bool DescribeArguments(const CommandEntry& entry, ReplyArray& args);
-
-    /// Collects the distinct categories on the chain into `out`. Caller holds the
-    /// mutex. Returns how many were found; `truncated` says the chain had more than
-    /// MAX_CATEGORIES of them.
-    size_t CollectCategories(const char** out, size_t cap, bool& truncated);
-
-    inline static CommandEntry commands_[] = {
-        { "help", "list",     &InvokeCommand<&CommandManager::Cmd_Help>,
-          "List the device's command categories, one category's commands, or one "
-          "command's arguments." },
-        { "help", "describe", &InvokeCommand<&CommandManager::Cmd_Describe>,
-          "Describe every command this firmware offers - category, name, description "
-          "and full argument declarations - in one reply." },
-    };
+    // Defined in CommandManager.cpp, beside the handler and the chain it walks.
+    static CommandEntry helpCommand_;
 };

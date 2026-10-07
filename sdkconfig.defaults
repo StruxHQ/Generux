@@ -1,10 +1,25 @@
-# Partition table
-CONFIG_PARTITION_TABLE_CUSTOM=y
-CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
-
-# Flash size and speed
-CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
-CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+# ──────────────────────────────────────────────────────────────
+# What the Strux APPLICATION needs of whatever platform it runs on.
+#
+# Nothing here may be a property of a particular board. The test is whether the
+# line would still be true on a board nobody has built yet: WebSocket support and
+# a socket budget are the application's, while flash size, flash timing and the
+# partition layout are the hardware's and live in
+# main/hardware/boards/<board>/sdkconfig.defaults, which every board has.
+#
+# That is not a filing preference, it is what keeps the drift guard honest. Flash
+# size and partition-table selection are Kconfig CHOICEs: a board picking another
+# arm sets a DIFFERENT symbol, so a line here would not be overridden by that
+# board, it would be FALSIFIED — and the guard would correctly stop a tree that
+# was configured exactly as asked. See the guard in the root CMakeLists.
+#
+# What the application does require of a board's table, and what a new board's
+# partitions.csv therefore has to provide: an `nvs` partition (settings, WiFi
+# credentials, auth), `otadata` and `phy_init`, and TWO app slots large enough
+# for the image — the frontend is linked into it, and `partition activate` is
+# what makes an upload bootable. Sizes are the board's business; their existence
+# is not.
+# ──────────────────────────────────────────────────────────────
 
 # HTTP server WebSocket support
 CONFIG_HTTPD_WS_SUPPORT=y

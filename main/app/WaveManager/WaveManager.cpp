@@ -21,7 +21,7 @@ void WaveManager::Init()
 
     StruxProvider& strux = app_.getStrux();
     strux.getSettingsManager().Register({ &enabledSetting_, &freqSetting_ });
-    strux.getCommandManager().Register(this, commands_);
+    strux.getCommandManager().Register(this, { &getCommand_, &setCommand_ });
 
     // Resume whatever was last persisted. A stored frequency that is out of range
     // (only reachable through `settings set`) leaves the output off.
@@ -80,37 +80,59 @@ void WaveManager::WriteState(CommandContext& ctx, bool ok, const char* error)
     resp.field("max", MAX_HZ);
 }
 
-RequestError WaveManager::Cmd_Get(CommandContext& ctx)
+namespace {
+
+constexpr CommandArg<bool> enabledArg{
+    "enabled", "true runs the output, false stops it and holds the pin low. "
+               "Absent leaves it as it is.",
+    Presence::Optional };
+
+constexpr CommandArg<uint32_t> freqArg{
+    "freq", "Frequency in Hz, 5 to 100000. Absent keeps the current one.",
+    Presence::Optional };
+
+constexpr CommandArg<bool> persistArg{
+    "persist", "false applies without writing flash - for the many small steps "
+               "of a sweep; send the last one persisted. Default true.",
+    Presence::Optional };
+
+} // namespace
+
+CommandEntry WaveManager::getCommand_{
+    "wave get", &InvokeCommand<&WaveManager::Cmd_Get>,
+    "Report the square-wave output: whether it is on, the frequency set, the "
+    "frequency actually produced, and the allowed range."
+};
+
+CommandEntry WaveManager::setCommand_{
+    "wave set", &InvokeCommand<&WaveManager::Cmd_Set>,
+    "Set the square-wave frequency and/or switch the output on or off. Applied "
+    "immediately and persisted unless persist is false. Omitted arguments keep "
+    "their current value.",
+    { &enabledArg, &freqArg, &persistArg }
+};
+
+CommandResult WaveManager::Cmd_Get(CommandContext& ctx)
 {
-    RETURN_IF_ERROR(ctx.readArgs());
     WriteState(ctx, true, nullptr);
-    return RequestError::Ok;
+    return CommandResult::Ok;
 }
 
-RequestError WaveManager::Cmd_Set(CommandContext& ctx)
+CommandResult WaveManager::Cmd_Set(CommandContext& ctx)
 {
-    bool enabled = enabled_;
-    uint32_t freq = hz_;
-    bool persist = true;
-
-    RETURN_IF_ERROR(ctx.readArgs(
-        Optional("enabled", enabled,
-                 "true runs the output, false stops it and holds the pin low. "
-                 "Absent leaves it as it is."),
-        Optional("freq", freq,
-                 "Frequency in Hz, 5 to 100000. Absent keeps the current one."),
-        Optional("persist", persist,
-                 "false applies without writing flash - for the many small steps "
-                 "of a sweep; send the last one persisted. Default true.")
-    ));
+    // Every argument is "absent keeps what is there", so each one falls back
+    // explicitly: an omitted optional decodes as false/0, not as the current value.
+    const bool enabled = ctx.has(enabledArg) ? ctx.arg(enabledArg) : enabled_;
+    const uint32_t freq = ctx.has(freqArg) ? ctx.arg(freqArg) : hz_;
+    const bool persist = ctx.has(persistArg) ? ctx.arg(persistArg) : true;
 
     if (freq < MIN_HZ || freq > MAX_HZ)
     {
         WriteState(ctx, false, "freq is outside 5..100000 Hz");
-        return RequestError::Ok;
+        return CommandResult::Ok;
     }
 
     const bool ok = Set(enabled, freq, persist);
     WriteState(ctx, ok, ok ? nullptr : "the hardware could not produce that frequency");
-    return RequestError::Ok;
+    return CommandResult::Ok;
 }

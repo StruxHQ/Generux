@@ -1,7 +1,7 @@
 import * as React from "react"
+import { cn } from "cn"
 import { Dialog as DialogPrimitive } from "radix-ui"
 
-import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import { XIcon } from "lucide-react"
 
@@ -128,7 +128,7 @@ function DialogTitle({
     <DialogPrimitive.Title
       data-slot="dialog-title"
       className={cn(
-        "text-base leading-none font-medium",
+        "font-heading text-base leading-none font-medium",
         className
       )}
       {...props}

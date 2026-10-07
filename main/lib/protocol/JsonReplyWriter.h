@@ -11,8 +11,8 @@
 // no state beyond the stream — every byte goes straight out, and a reply of any size
 // costs the same nothing that JsonScope already cost.
 //
-// It is the mirror of JsonArgReader, and the reason a handler can be written without
-// naming a wire format. Unlike that one it has no buffer to delete: the reply side was
+// It is the mirror of DecodeJsonArgs, and the reason a handler can be written without
+// naming a wire format. Unlike that one it holds no buffer at all: the reply side was
 // never the place the RAM went.
 class JsonReplyWriter final : public ReplyWriter
 {
@@ -27,6 +27,12 @@ protected:
     void separator()   override { out_.write(",", 1); }
 
     void key(const char* name) override { WriteEscaped(name); out_.write(":", 1); }
+
+    // A record it produced can never contain a raw newline: strings are escaped and
+    // every control character below 0x20 is dropped. See ReplyBody.h.
+    void endRecord() override { out_.write("\n", 1); }
+
+    Stream& stream() override { return out_; }
 
     void value(const char* v) override { WriteEscaped(v); }
     void value(bool v)        override { WriteRaw(v ? "true" : "false"); }

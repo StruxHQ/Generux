@@ -5,7 +5,7 @@
 
 // The fixed slot table of live connections. Owns allocation, lookup, removal,
 // and the pre-auth reaper. Thread-safe (its own mutex). Snapshot via forEach
-// for broadcast (the caller sends outside any lock it holds).
+// by the log pump (the caller sends outside any lock it holds).
 class ConnectionRegistry {
     static constexpr const char* TAG = "ConnectionRegistry";
 public:

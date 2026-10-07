@@ -1,6 +1,6 @@
 import { useRef, useState } from "react"
 
-import { cn } from "@/lib/utils"
+import { cn } from "cn"
 
 // Inside this much of centre counts as centre, so a thumb let go a pixel off does
 // not keep creeping.
