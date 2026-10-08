@@ -219,6 +219,10 @@ void RelayManager::TaskLoop()
     {
         if (!socket_.IsConnected())
         {
+            // A send that failed mid-request marks the socket dead without passing
+            // through a read, so the disconnect is owed here.
+            if (linkUp_) OnDisconnected();
+
             // Nothing to dial with yet. This task starts during Init, while WiFi is
             // still associating, so without this every boot spends a connect attempt
             // it cannot win and logs three ERROR lines from the TLS and transport

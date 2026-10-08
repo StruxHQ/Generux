@@ -85,6 +85,12 @@ class Channel : public Stream
         // and on a relay those get mapped to whoever holds that id next.
         if (reset_) { outLen_ = 0; return; }
 
+        // Nor after a send has failed. One lost chunk makes everything after it
+        // wrong, and a FINAL behind it would vouch for a reply with a hole in it --
+        // a peer can tell a short reply from a complete one, but not a reply with
+        // its middle missing from a complete one.
+        if (failed_) { outLen_ = 0; return; }
+
         channel::writeHeader(buf_, id_, flags);
         if (!link_.SendRaw(buf_, channel::HEADER_LEN + outLen_)) failed_ = true;
         outLen_ = 0;

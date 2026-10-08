@@ -186,5 +186,14 @@ CommandResult WebServerManager::Cmd_GetWebFile(CommandContext& ctx)
     // 200 KB buffer here or on the transport — and no read buffer at all now that
     // there is no file to read.
     body.write(file.data, file.size);
+
+    // The relay caches what this returns and tells browsers the hashed assets are
+    // immutable, so a short body reported as Ok is not a slow page, it is a broken
+    // one until the cache is cleared. RESET, not FINAL, when it did not all go out.
+    if (body.failed())
+    {
+        ESP_LOGW(TAG, "web read %s: body not fully sent", path);
+        return CommandResult::ReplyIncomplete;
+    }
     return CommandResult::Ok;
 }

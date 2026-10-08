@@ -269,7 +269,16 @@ bool RelaySocket::SendBinary(const uint8_t* data, size_t len, int timeoutMs)
                                                 WS_TRANSPORT_OPCODES_FIN),
         reinterpret_cast<const char*>(data), static_cast<int>(len), timeoutMs);
 
-    return sent == static_cast<int>(len);
+    if (sent == static_cast<int>(len)) return true;
+
+    // A send that timed out or stopped short may have put part of a frame on the
+    // wire, and nothing after it can be framed correctly any more: the next frame's
+    // header would be read as the rest of this one's payload. Carrying on is how a
+    // 147 KB bundle reached the relay with a hole in it, was cached as a 200 and
+    // served to every browser as a SyntaxError. So the link is over -- marked here,
+    // closed by the task loop, which owns the handles.
+    connected_ = false;
+    return false;
 }
 
 bool RelaySocket::SendPing(int timeoutMs)
