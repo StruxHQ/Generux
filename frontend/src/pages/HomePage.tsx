@@ -6,7 +6,6 @@ import { AutoSweep } from "@/components/AutoSweep"
 import { DigitDisplay } from "@/components/DigitDisplay"
 import { JogSlider } from "@/components/JogSlider"
 import { RangeSlider, type Tick } from "@/components/RangeSlider"
-import { ScopeView } from "@/components/ScopeView"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Separator } from "@/components/ui/separator"
@@ -236,6 +235,7 @@ export default function HomePage() {
 
   const [dutyEdit, setDutyEdit] = useState<string | null>(null)
   const [exact, setExact] = useState("")
+  const [tab, setTab] = useState<"presets" | "sweep">("presets")
   const exactHz = parseHz(exact)
   const exactValid = Number.isFinite(exactHz) && exactHz >= min && exactHz <= max
 
@@ -246,7 +246,6 @@ export default function HomePage() {
   const shownHz = liveHz ?? (state ? (running ? state.actual : state.freq) : 0)
   const duty = liveDuty ?? state?.duty ?? 50
   const dutyActual = state?.dutyActual ?? 0
-  const shownDuty = liveDuty ?? (running && dutyActual > 0 ? dutyActual : duty)
 
   let note = ""
   if (liveHz !== null) note = "Adjusting"
@@ -285,30 +284,111 @@ export default function HomePage() {
         </button>
       </header>
 
-      <div className="grid gap-4 lg:grid-cols-[3fr_2fr]">
+      {/* The frequency card takes the width its digits need; presets, sweep and
+          the output switch share the rest. Stacked below lg. */}
+      <div className="grid gap-4 lg:grid-cols-[auto_minmax(0,1fr)]">
         <Panel title="Frequency" aside={`${formatHz(min)} – ${formatHz(max)}`}
           className="flex flex-col">
-          {/* Centred in whatever height the scope beside it gives the row. */}
           <div className="flex flex-1 flex-col justify-center py-3">
             <DigitDisplay hz={setHz} max={max} onNudge={nudge} disabled={!ready} dim={!running && ready} />
           </div>
           <p className="text-muted-foreground mt-2 text-sm">
             Click a digit to select · Scroll or use ↑↓ to adjust · Hold for faster changes
           </p>
+          <div className="text-muted-foreground mt-2 flex flex-wrap gap-x-5 gap-y-1 text-sm">
+            <span>
+              Output <span className="text-foreground font-medium tabular-nums">{ready ? formatHz(shownHz) : "…"}</span>
+            </span>
+            <span>
+              Period <span className="text-foreground font-medium tabular-nums">{formatPeriod(shownHz)}</span>
+            </span>
+            {note && <span>{note}</span>}
+          </div>
         </Panel>
 
-        <Panel title="Waveform (square)">
-          <ScopeView hz={shownHz} duty={shownDuty} on={running} />
-          <div className="mt-3 flex flex-wrap justify-between gap-x-4 gap-y-1 text-sm">
-            <span className="text-muted-foreground">
-              Period: <span className="text-foreground font-medium tabular-nums">{formatPeriod(shownHz)}</span>
-            </span>
-            <span className="text-muted-foreground">
-              Freq: <span className="text-foreground font-medium tabular-nums">{ready ? formatHz(shownHz) : "…"}</span>
-            </span>
-          </div>
-          <p className="text-muted-foreground mt-1 h-5 text-xs">{note}</p>
-        </Panel>
+        <div className="flex min-w-0 flex-col gap-4">
+          <Panel className="flex-1">
+            <div role="tablist" aria-label="More controls" className="bg-muted mb-4 inline-flex rounded-lg p-1">
+              {(["presets", "sweep"] as const).map((t) => (
+                <button key={t} type="button" role="tab" aria-selected={tab === t}
+                  onClick={() => setTab(t)}
+                  className={cn(
+                    "flex items-center gap-2 rounded-md px-4 py-1.5 text-sm font-semibold tracking-[0.12em] uppercase transition-colors",
+                    tab === t ? "bg-card text-foreground shadow-xs" : "text-muted-foreground hover:text-foreground",
+                  )}>
+                  {t}
+                  {/* A sweep keeps running on the other tab; say so. */}
+                  {t === "sweep" && autoActive && (
+                    <span className="bg-signal size-2 rounded-full shadow-[0_0_6px_var(--signal)]" />
+                  )}
+                </button>
+              ))}
+            </div>
+
+            {tab === "presets" ? (
+              <>
+                <div className="grid grid-cols-4 gap-1.5">
+                  {PRESETS.map((p) => {
+                    const active = liveHz === null && state?.freq === p
+                    return (
+                      <Button key={p} variant="outline" disabled={!ready}
+                        onClick={() => jump(() => p)}
+                        className={cn("tabular-nums", active &&
+                          "border-signal bg-signal text-signal-foreground hover:bg-signal/90 hover:text-signal-foreground")}>
+                        {formatHz(p)}
+                      </Button>
+                    )
+                  })}
+                </div>
+                <form
+                  className="mt-4 flex gap-2"
+                  onSubmit={(e) => {
+                    e.preventDefault()
+                    if (exactValid) {
+                      jump(() => exactHz)
+                      setExact("")
+                    }
+                  }}
+                >
+                  <Input aria-label="Exact frequency" placeholder="Exact frequency: 440, 1.5k, 0.5M"
+                    inputMode="decimal" value={exact} onChange={(e) => setExact(e.target.value)}
+                    aria-invalid={exact !== "" && !exactValid} disabled={!ready} />
+                  <Button type="submit" disabled={!exactValid || busy}>Set</Button>
+                </form>
+              </>
+            ) : (
+              <>
+                <div className="space-y-1.5">
+                  <JogSlider label="Sweep the frequency down or up" onJog={onJog} disabled={!ready} />
+                  <div className="text-muted-foreground flex justify-between text-xs">
+                    <span>◀ lower</span>
+                    <span>hold to sweep · further is faster</span>
+                    <span>higher ▶</span>
+                  </div>
+                </div>
+                <Separator className="my-4" />
+                <AutoSweep min={min} max={max} active={autoActive} disabled={!ready}
+                  onStart={(plan) => startMotion({ kind: "auto", t0: performance.now(), ...plan }, plan.from)}
+                  onStop={stopMotion} />
+              </>
+            )}
+          </Panel>
+
+          <button
+            type="button"
+            disabled={!ready || busy}
+            onClick={() => void setOutput(!running)}
+            className={cn(
+              "flex w-full items-center justify-center gap-3 rounded-2xl border-2 py-4 text-lg font-bold tracking-[0.12em] uppercase transition-colors disabled:opacity-50",
+              running
+                ? "border-signal bg-signal text-signal-foreground shadow-[0_0_28px_-8px_var(--signal)] hover:bg-signal/90"
+                : "border-border bg-card hover:bg-muted text-muted-foreground",
+            )}
+          >
+            <PowerIcon className="size-6" strokeWidth={2.5} />
+            Output {running ? "enabled" : "disabled"}
+          </button>
+        </div>
       </div>
 
       <Panel>
@@ -371,69 +451,6 @@ export default function HomePage() {
           <span>{MAX_DUTY}%</span>
         </div>
       </Panel>
-
-      <button
-        type="button"
-        disabled={!ready || busy}
-        onClick={() => void setOutput(!running)}
-        className={cn(
-          "flex w-full items-center justify-center gap-3 rounded-2xl border-2 py-4 text-lg font-bold tracking-[0.12em] uppercase transition-colors disabled:opacity-50",
-          running
-            ? "border-signal bg-signal text-signal-foreground shadow-[0_0_28px_-8px_var(--signal)] hover:bg-signal/90"
-            : "border-border bg-card hover:bg-muted text-muted-foreground",
-        )}
-      >
-        <PowerIcon className="size-6" strokeWidth={2.5} />
-        Output {running ? "enabled" : "disabled"}
-      </button>
-
-      <div className="grid gap-4 md:grid-cols-2">
-        <Panel title="Presets">
-          <div className="grid grid-cols-4 gap-1.5">
-            {PRESETS.map((p) => {
-              const active = liveHz === null && state?.freq === p
-              return (
-                <Button key={p} variant="outline" disabled={!ready}
-                  onClick={() => jump(() => p)}
-                  className={cn("tabular-nums", active &&
-                    "border-signal bg-signal text-signal-foreground hover:bg-signal/90 hover:text-signal-foreground")}>
-                  {formatHz(p)}
-                </Button>
-              )
-            })}
-          </div>
-          <form
-            className="mt-4 flex gap-2"
-            onSubmit={(e) => {
-              e.preventDefault()
-              if (exactValid) {
-                jump(() => exactHz)
-                setExact("")
-              }
-            }}
-          >
-            <Input aria-label="Exact frequency" placeholder="Exact frequency: 440, 1.5k, 0.5M"
-              inputMode="decimal" value={exact} onChange={(e) => setExact(e.target.value)}
-              aria-invalid={exact !== "" && !exactValid} disabled={!ready} />
-            <Button type="submit" disabled={!exactValid || busy}>Set</Button>
-          </form>
-        </Panel>
-
-        <Panel title="Sweep">
-          <div className="space-y-1.5">
-            <JogSlider label="Sweep the frequency down or up" onJog={onJog} disabled={!ready} />
-            <div className="text-muted-foreground flex justify-between text-xs">
-              <span>◀ lower</span>
-              <span>hold to sweep · further is faster</span>
-              <span>higher ▶</span>
-            </div>
-          </div>
-          <Separator className="my-4" />
-          <AutoSweep min={min} max={max} active={autoActive} disabled={!ready}
-            onStart={(plan) => startMotion({ kind: "auto", t0: performance.now(), ...plan }, plan.from)}
-            onStop={stopMotion} />
-        </Panel>
-      </div>
 
       {error && (
         <p className="text-destructive text-sm">
