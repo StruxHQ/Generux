@@ -30,7 +30,7 @@
 namespace DeviceDoc {
 
 inline constexpr const char* DESCRIPTION =
-    "Wavy square-wave generator - one pin, 50% duty, 5 Hz to 100 kHz, set from "
+    "Wavy square-wave generator - one pin, 50% duty, 5 Hz to 13.3 MHz, set from "
     "the web UI.";
 
 inline constexpr const char* INSTRUCTIONS =
@@ -42,8 +42,12 @@ inline constexpr const char* INSTRUCTIONS =
     "frequency actually produced (`actual`, 0 while off) and the allowed range "
     "(`min`/`max`, in Hz). `wave set -freq 25000 -enabled true` changes either or "
     "both; omitted arguments keep their value. Changes apply at once and are "
-    "persisted, so the output resumes after a reboot. `actual` can differ slightly "
-    "from `freq` when 80 MHz is not a whole multiple of it. The pin is GPIO4 on the "
+    "persisted, so the output resumes after a reboot. Up to 500 kHz `actual` "
+    "differs from `freq` by up to about 0.1%, when 80 MHz is not a whole multiple "
+    "of it. Above 500 kHz the output snaps to the nearest 40 MHz / n (13.333, 10, "
+    "8, 6.667 ... MHz) so that every period is identical, and `actual` says which "
+    "one it reached. The range stops at 13.333 MHz because faster outputs disrupt "
+    "the device's own WiFi. The pin is GPIO4 on the "
     "ESP32-C3 SuperMini and GPIO25 on the ESP32 DevKit; it is held low while off.\n"
     "\n"
     "Discovering what it can do\n"

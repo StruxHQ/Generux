@@ -15,13 +15,19 @@ import { cn } from "cn"
 import { formatHz, formatPeriod, parseHz, useWave } from "@/hooks/use-wave"
 import type { SweepPlan } from "@/components/AutoSweep"
 
-const PRESETS = [50, 100, 1_000, 5_000, 10_000, 20_000, 50_000, 100_000]
-const STEPS = [10_000, 1_000, 100, 10, 1]
+const PRESETS = [50, 1_000, 10_000, 100_000, 500_000, 1_000_000, 5_000_000, 10_000_000]
+
+/// The five step buttons, from the frequency's own decade down: 10 kHz … 1 Hz up
+/// to 100 kHz, then 100 kHz … 10 Hz in the hundreds of kHz, and so on.
+function stepsFor(hz: number): number[] {
+  const top = 10 ** Math.max(4, Math.floor(Math.log10(Math.max(1, hz))))
+  return [top, top / 10, top / 100, top / 1000, top / 10_000]
+}
 
 // Jog speed at full deflection, in octaves per second. The deflection is squared
 // first, so the first part of the travel is fine adjustment: a tenth of the way out
 // moves about 2% a second, all the way out doubles the frequency three times a
-// second — the whole 5 Hz to 100 kHz range in under five seconds.
+// second — the whole 5 Hz to 13 MHz range in about seven seconds.
 const MAX_OCTAVES_PER_S = 3
 
 // Scrolling the readout streams each notch unpersisted and commits once the wheel
@@ -30,8 +36,9 @@ const WHEEL_SETTLE_MS = 600
 // A notch off the digits moves the frequency by this factor.
 const WHEEL_FACTOR = 1.01
 
-type Unit = "Hz" | "kHz"
-const SCALE: Record<Unit, number> = { Hz: 1, kHz: 1000 }
+type Unit = "Hz" | "kHz" | "MHz"
+const UNITS: Unit[] = ["Hz", "kHz", "MHz"]
+const SCALE: Record<Unit, number> = { Hz: 1, kHz: 1000, MHz: 1e6 }
 
 /// What is moving the frequency right now, frame by frame.
 type Motion = { kind: "jog" } | ({ kind: "auto"; t0: number } & SweepPlan)
@@ -49,7 +56,7 @@ export default function HomePage() {
   const { state, busy, error, set, sweepTo, sweepEnd } = useWave()
 
   const min = state?.min ?? 5
-  const max = state?.max ?? 100_000
+  const max = state?.max ?? 13_333_333
   const clamp = (hz: number) => Math.max(min, Math.min(max, Math.round(hz)))
 
   // ── Typed frequency. Kept apart from what the device reports, so a poll does
@@ -64,9 +71,9 @@ export default function HomePage() {
   }, [state, seeded])
 
   function showTyped(freq: number) {
-    const u: Unit = freq >= 1000 ? "kHz" : "Hz"
+    const u: Unit = freq >= 1e6 ? "MHz" : freq >= 1000 ? "kHz" : "Hz"
     setUnit(u)
-    setText(String(+(freq / SCALE[u]).toFixed(3)))
+    setText(String(+(freq / SCALE[u]).toFixed(6)))
   }
 
   const typed = parseHz(text, SCALE[unit])
@@ -215,6 +222,7 @@ export default function HomePage() {
   const running = state?.enabled === true
   const shownHz = liveHz ?? (state ? (running ? state.actual : state.freq) : 0)
   const current = liveHz ?? base()
+  const steps = stepsFor(current)
 
   let caption = ""
   if (liveHz !== null) caption = `Adjusting · period ${formatPeriod(liveHz)}`
@@ -259,11 +267,11 @@ export default function HomePage() {
             </div>
 
             <div className="grid grid-cols-5 gap-1.5">
-              {STEPS.map((s) => (
+              {steps.map((s) => (
                 <StepButton key={`+${s}`} label={`+${formatHz(s)}`}
                   disabled={!ready || current >= max} onClick={() => jump((f) => f + s)} />
               ))}
-              {STEPS.map((s) => (
+              {steps.map((s) => (
                 <StepButton key={`-${s}`} label={`−${formatHz(s)}`}
                   disabled={!ready || current <= min} onClick={() => jump((f) => f - s)} />
               ))}
@@ -287,17 +295,17 @@ export default function HomePage() {
             >
               <div className="min-w-0 flex-1 space-y-1.5">
                 <Label htmlFor="wave-freq" className="text-muted-foreground text-xs">
-                  Exact frequency (1.5k works too)
+                  Exact frequency (1.5k or 2M works too)
                 </Label>
                 <Input id="wave-freq" inputMode="decimal" value={text}
                   onChange={(e) => setText(e.target.value)}
                   aria-invalid={text !== "" && !typedValid} disabled={!ready} />
               </div>
               <div className="flex">
-                {(["Hz", "kHz"] as const).map((u) => (
+                {UNITS.map((u, i) => (
                   <Button key={u} type="button" variant={unit === u ? "default" : "outline"}
                     onClick={() => setUnit(u)}
-                    className={u === "Hz" ? "rounded-r-none" : "rounded-l-none"}>
+                    className={cn(i > 0 && "rounded-l-none", i < UNITS.length - 1 && "rounded-r-none")}>
                     {u}
                   </Button>
                 ))}

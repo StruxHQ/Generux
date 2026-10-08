@@ -88,7 +88,9 @@ constexpr CommandArg<bool> enabledArg{
     Presence::Optional };
 
 constexpr CommandArg<uint32_t> freqArg{
-    "freq", "Frequency in Hz, 5 to 100000. Absent keeps the current one.",
+    "freq", "Frequency in Hz, 5 to 13333333. Above 500 kHz the output snaps to "
+            "40 MHz / n; 'actual' in the reply is what it reached. Absent keeps the "
+            "current one.",
     Presence::Optional };
 
 constexpr CommandArg<bool> persistArg{
@@ -128,7 +130,7 @@ CommandResult WaveManager::Cmd_Set(CommandContext& ctx)
 
     if (freq < MIN_HZ || freq > MAX_HZ)
     {
-        WriteState(ctx, false, "freq is outside 5..100000 Hz");
+        WriteState(ctx, false, "freq is outside 5..13333333 Hz");
         return CommandResult::Ok;
     }
 

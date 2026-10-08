@@ -13,8 +13,8 @@ const PX_PER_LINE = PX_PER_NOTCH / 3
  * way a bench generator works. Scrolling over the readout but off the digits reports
  * `place` null and leaves the step size to the caller.
  *
- * Shows whole hertz, in kHz with all three decimals from 1 kHz up, so every digit
- * of the frequency is on screen to be scrolled.
+ * Shows whole hertz — in kHz with three decimals from 1 kHz, in MHz with six from
+ * 1 MHz — so every digit of the frequency is on screen to be scrolled.
  */
 export function FrequencyReadout({
   hz,
@@ -58,8 +58,8 @@ export function FrequencyReadout({
   }, [])
 
   const whole = String(Math.max(0, Math.round(hz)))
-  const kilo = hz >= 1000
-  const point = whole.length - 3 // index the decimal point goes before, in kHz
+  const [unit, decimals] = hz >= 1e6 ? ["MHz", 6] : hz >= 1000 ? ["kHz", 3] : ["Hz", 0]
+  const point = decimals > 0 ? whole.length - decimals : -1 // index the decimal point goes before
 
   return (
     <p ref={el} className={cn("tabular-nums select-none", dim && "opacity-60")}
@@ -67,7 +67,7 @@ export function FrequencyReadout({
       <span className="text-5xl font-bold tracking-tight sm:text-6xl">
         {!ready ? "…" : [...whole].map((ch, i) => (
           <span key={i}>
-            {kilo && i === point && "."}
+            {i === point && "."}
             <span data-place={10 ** (whole.length - 1 - i)}
               className="hover:bg-muted cursor-ns-resize rounded-sm transition-colors">
               {ch}
@@ -75,7 +75,7 @@ export function FrequencyReadout({
           </span>
         ))}
       </span>
-      <span className="text-muted-foreground ml-2 text-2xl sm:text-3xl">{kilo ? "kHz" : "Hz"}</span>
+      <span className="text-muted-foreground ml-2 text-2xl sm:text-3xl">{unit}</span>
     </p>
   )
 }

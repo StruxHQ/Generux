@@ -27,7 +27,12 @@ public:
     // both ends on these chips; these are the ends that are tested and exact enough
     // to be worth offering.
     static constexpr uint32_t MIN_HZ = 5;
-    static constexpr uint32_t MAX_HZ = 100'000;
+    //
+    // The top is not the hardware's (that is APB / 2 = 40 MHz) but the radio's:
+    // measured on the C3 SuperMini on 2026-10-08, an output at 40 MHz / 3 left Wi-Fi
+    // where it was at 100 kHz, and the next step up, 20 MHz, lost 90 % of pings.
+    // Persisting that would boot the device off its own network, so it is not offered.
+    static constexpr uint32_t MAX_HZ = 13'333'333;
 
     explicit WaveManager(AppProvider& app);
 

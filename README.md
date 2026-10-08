@@ -2,7 +2,7 @@
 
 *A square-wave generator you set from a browser.*
 
-Wavy drives one pin with a 50% duty square wave, 5 Hz to 100 kHz, at a frequency you set from its web UI (or the `wave` commands). It runs on an ESP32-C3 SuperMini (output on GPIO4) or an ESP32 DevKit (GPIO25).
+Wavy drives one pin with a 50% duty square wave, 5 Hz to 13.3 MHz, at a frequency you set from its web UI (or the `wave` commands). It runs on an ESP32-C3 SuperMini (output on GPIO4) or an ESP32 DevKit (GPIO25).
 
 It is built on [Strux](https://github.com/vanBassum/Strux), an ESP32 firmware foundation that provides the WiFi, web UI, OTA updates, settings and command infrastructure. The framework lives in `main/strux/` and keeps its own names, so improvements can still be pulled across from the template. The rest of this README describes that foundation.
 

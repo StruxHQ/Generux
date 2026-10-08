@@ -6,6 +6,7 @@
 #include "esp_pm.h"
 #include "esp_log.h"
 #include "soc/soc_caps.h"
+#include <algorithm>
 
 // ──────────────────────────────────────────────────────────────
 // Square wave on one pin from an LEDC timer, 50% duty. Pin injected by
@@ -18,7 +19,9 @@
 // number, a resolution is picked that leaves an integer divider, and the
 // output has no jitter at all (100 kHz = 80 MHz / 25 / 2^5). Otherwise the
 // fractional divider dithers between two neighbouring periods — one APB
-// cycle, 12.5 ns — and averages out to the requested frequency.
+// cycle, 12.5 ns — and averages out to the requested frequency. Above
+// DITHER_MAX_HZ that dither is too large a share of the period, and the
+// output snaps to the nearest whole divider instead (40 MHz at the top).
 //
 // Retuning a running output only rewrites the divider, which low-speed
 // mode latches at the end of the current period: no reset, no runt pulse,
@@ -48,6 +51,13 @@ class LedcSquareWave : public SquareWave
     static constexpr uint64_t DIV_MIN = 1u << 8;
     static constexpr uint64_t DIV_MAX = (1u << 18) - 1;
 
+    // Above this a fractional divider stops being worth having. Its dither moves an
+    // edge by one APB cycle, 12.5 ns, which is 0.6% of a period here and a whole
+    // half-period at 40 MHz, where 25 MHz would come out as 40 and 20 MHz cycles
+    // taking turns. So above it the output snaps to APB / 2 / n -- 40, 20, 13.33, 10,
+    // 8 ... MHz, 1.25% apart at this end -- and reports what it reached.
+    static constexpr uint32_t DITHER_MAX_HZ = 500'000;
+
 public:
     explicit LedcSquareWave(int pin)
         : pin_(static_cast<gpio_num_t>(pin))
@@ -71,10 +81,29 @@ public:
 
     bool Start(uint32_t hz) override
     {
-        if (running_ && Retune(hz))
-            return true;
+        uint32_t bits;
+        if (hz > DITHER_MAX_HZ)
+        {
+            // Snap to APB / 2 / n: one-bit resolution and a whole divider, so every
+            // period is identical. The frequency handed to the driver is truncated,
+            // which leaves the divider it computes a hair above n -- n, either way it
+            // rounds.
+            const uint32_t n = std::max<uint32_t>(1, (APB_HZ / 2 + hz / 2) / hz);
+            hz = APB_HZ / 2 / n;
+            bits = 1;
+            if (running_ && bits_ == bits && ledc_set_freq(MODE, TIMER, hz) == ESP_OK)
+            {
+                actualHz_ = ledc_get_freq(MODE, TIMER);
+                return true;
+            }
+        }
+        else
+        {
+            if (running_ && Retune(hz))
+                return true;
+            bits = PickResolution(hz);
+        }
 
-        const uint32_t bits = PickResolution(hz);
         if (bits == 0)
         {
             ESP_LOGW(TAG, "%lu Hz is out of reach", (unsigned long)hz);

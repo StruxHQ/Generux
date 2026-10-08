@@ -107,25 +107,30 @@ export function useWave() {
   return { state, busy, error, set, sweepTo, sweepEnd, refresh }
 }
 
-/// "100 kHz", "1.5 kHz", "440 Hz".
+/// "10 MHz", "1.5 kHz", "440 Hz".
 export function formatHz(hz: number): string {
   const { value, unit } = hzParts(hz)
   return `${value} ${unit}`
 }
 
 /// The number and the unit apart, for a readout that sets them in different sizes.
-export function hzParts(hz: number): { value: string; unit: "Hz" | "kHz" } {
+export function hzParts(hz: number): { value: string; unit: "Hz" | "kHz" | "MHz" } {
+  if (hz >= 1e6) return { value: String(+(hz / 1e6).toFixed(6)), unit: "MHz" }
   if (hz >= 1000) return { value: String(+(hz / 1000).toFixed(3)), unit: "kHz" }
   return { value: String(hz), unit: "Hz" }
 }
 
-/// Parse what somebody typed: "1500", "1.5k", "1.5 kHz", "20hz". A bare number is
-/// in `bareUnitHz` (1 for Hz, 1000 for kHz). NaN when it is not a frequency.
+/// Parse what somebody typed: "1500", "1.5k", "1.5 kHz", "20hz", "2.5M". A bare
+/// number is in `bareUnitHz` (1 for Hz, 1000 for kHz, 1e6 for MHz). NaN when it is
+/// not a frequency.
 export function parseHz(text: string, bareUnitHz = 1): number {
-  const m = text.trim().toLowerCase().match(/^(\d+(?:[.,]\d*)?|[.,]\d+)\s*(k|khz|hz)?$/)
+  const m = text.trim().toLowerCase().match(/^(\d+(?:[.,]\d*)?|[.,]\d+)\s*(k|khz|m|mhz|hz)?$/)
   if (!m) return NaN
   const n = Number(m[1].replace(",", "."))
-  const scale = m[2] === "k" || m[2] === "khz" ? 1000 : m[2] === "hz" ? 1 : bareUnitHz
+  const scale = m[2] === "k" || m[2] === "khz" ? 1000
+    : m[2] === "m" || m[2] === "mhz" ? 1e6
+    : m[2] === "hz" ? 1
+    : bareUnitHz
   return Math.round(n * scale)
 }
 
@@ -134,5 +139,6 @@ export function formatPeriod(hz: number): string {
   if (hz <= 0) return "—"
   const us = 1e6 / hz
   if (us >= 1000) return `${+(us / 1000).toFixed(3)} ms`
-  return `${+us.toFixed(3)} µs`
+  if (us >= 1) return `${+us.toFixed(3)} µs`
+  return `${+(us * 1000).toFixed(1)} ns`
 }
