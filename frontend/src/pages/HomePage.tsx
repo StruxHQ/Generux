@@ -30,6 +30,10 @@ const HELD_MS = 60_000
 const MIN_DUTY = 1
 const MAX_DUTY = 99
 
+// One wheel notch or arrow press on the frequency slider, as a share of its log
+// scale: about 6 % of the frequency. The digits are for anything finer.
+const FREQ_SLIDER_STEP = 0.005
+
 /// What is moving the frequency right now, frame by frame.
 type Motion = { kind: "jog" } | ({ kind: "auto"; t0: number } & SweepPlan)
 
@@ -192,6 +196,7 @@ export default function HomePage() {
     () => () => {
       if (frame.current !== null) cancelAnimationFrame(frame.current)
       if (adjTimer.current !== null) clearTimeout(adjTimer.current)
+      if (dutyTimer.current !== null) clearTimeout(dutyTimer.current)
     },
     [],
   )
@@ -220,7 +225,26 @@ export default function HomePage() {
     dutyTo(v)
   }
 
+  // Wheel notches and arrow presses: streamed, committed once they stop.
+  const dutyPending = useRef<number | null>(null)
+  const dutyTimer = useRef<number | null>(null)
+
+  function dutyStep(steps: number) {
+    const v = clampDuty((dutyPending.current ?? liveDuty ?? state?.duty ?? 50) + steps)
+    dutyPending.current = v
+    dutyMove(v)
+    if (dutyTimer.current !== null) clearTimeout(dutyTimer.current)
+    dutyTimer.current = window.setTimeout(() => {
+      dutyTimer.current = null
+      dutyPending.current = null
+      dutyCommit(v)
+    }, ADJUST_SETTLE_MS)
+  }
+
   function dutyCommit(d: number) {
+    if (dutyTimer.current !== null) clearTimeout(dutyTimer.current)
+    dutyTimer.current = null
+    dutyPending.current = null
     const v = clampDuty(d)
     setLiveDuty(v)
     dutyLanded.current = v
@@ -254,34 +278,17 @@ export default function HomePage() {
 
   return (
     <div className="w-full space-y-4">
-      <header className="flex flex-wrap items-center justify-between gap-4">
-        <div className="flex items-center gap-3">
-          <svg viewBox="0 0 32 24" className="h-8 w-11 shrink-0" aria-hidden>
-            <path d="M2 20 H9 V4 H23 V20 H30" fill="none" strokeWidth={3.5}
-              strokeLinejoin="round" strokeLinecap="round"
-              className={running ? "stroke-signal" : "stroke-muted-foreground"}
-              style={running ? { filter: "drop-shadow(0 0 3px var(--signal))" } : undefined} />
-          </svg>
-          <h1 className="text-xl font-bold tracking-[0.08em] uppercase sm:text-3xl">
-            Square Wave Generator
-          </h1>
-        </div>
-        <button
-          type="button"
-          disabled={!ready || busy}
-          onClick={() => void setOutput(!running)}
-          className={cn(
-            "flex items-center gap-3 rounded-full border-2 px-5 py-2 text-sm font-bold tracking-wider uppercase transition-colors disabled:opacity-50",
-            running
-              ? "border-signal/60 bg-signal/10 text-signal shadow-[0_0_20px_-6px_var(--signal)]"
-              : "text-muted-foreground hover:bg-muted",
-          )}
-        >
-          <span className={cn("size-2.5 rounded-full",
-            running ? "bg-signal shadow-[0_0_8px_var(--signal)]" : "bg-muted-foreground/40")} />
-          Output {running ? "on" : "off"}
-          <PowerIcon className="size-5" />
-        </button>
+      {/* No output switch up here: the big button beside the presets is the one. */}
+      <header className="flex items-center gap-3">
+        <svg viewBox="0 0 32 24" className="h-8 w-11 shrink-0" aria-hidden>
+          <path d="M2 20 H9 V4 H23 V20 H30" fill="none" strokeWidth={3.5}
+            strokeLinejoin="round" strokeLinecap="round"
+            className={running ? "stroke-signal" : "stroke-muted-foreground"}
+            style={running ? { filter: "drop-shadow(0 0 3px var(--signal))" } : undefined} />
+        </svg>
+        <h1 className="text-xl font-bold tracking-[0.08em] uppercase sm:text-3xl">
+          Square Wave Generator
+        </h1>
       </header>
 
       {/* The frequency card takes the width its digits need; presets, sweep and
@@ -325,8 +332,11 @@ export default function HomePage() {
               ))}
             </div>
 
-            {tab === "presets" ? (
-              <>
+            {/* Both tabs share one grid cell and the hidden one keeps its space, so the
+                panel is always as tall as the taller tab and switching moves nothing. */}
+            <div className="grid">
+              <div role="tabpanel" className={cn("[grid-area:1/1]", tab !== "presets" && "invisible")}
+                inert={tab !== "presets"}>
                 <div className="grid grid-cols-4 gap-1.5">
                   {PRESETS.map((p) => {
                     const active = liveHz === null && state?.freq === p
@@ -355,9 +365,9 @@ export default function HomePage() {
                     aria-invalid={exact !== "" && !exactValid} disabled={!ready} />
                   <Button type="submit" disabled={!exactValid || busy}>Set</Button>
                 </form>
-              </>
-            ) : (
-              <>
+              </div>
+              <div role="tabpanel" className={cn("[grid-area:1/1]", tab !== "sweep" && "invisible")}
+                inert={tab !== "sweep"}>
                 <div className="space-y-1.5">
                   <JogSlider label="Sweep the frequency down or up" onJog={onJog} disabled={!ready} />
                   <div className="text-muted-foreground flex justify-between text-xs">
@@ -370,8 +380,8 @@ export default function HomePage() {
                 <AutoSweep min={min} max={max} active={autoActive} disabled={!ready}
                   onStart={(plan) => startMotion({ kind: "auto", t0: performance.now(), ...plan }, plan.from)}
                   onStop={stopMotion} />
-              </>
-            )}
+              </div>
+            </div>
           </Panel>
 
           <button
@@ -397,8 +407,9 @@ export default function HomePage() {
           valueText={formatHz(setHz)}
           position={toPos(setHz || min, min, max)}
           disabled={!ready}
-          step={0.002}
           ticks={logTicks(min, max)}
+          onStep={(n) => adjustTo(roundSig(fromPos(
+            toPos(adjHz.current ?? base(), min, max) + n * FREQ_SLIDER_STEP, min, max)))}
           onMove={(p) => adjustTo(roundSig(fromPos(p, min, max)), HELD_MS)}
           onRelease={(p) => {
             adjustTo(roundSig(fromPos(p, min, max)))
@@ -437,8 +448,8 @@ export default function HomePage() {
           tone="duty"
           valueText={`${duty}%`}
           position={(duty - MIN_DUTY) / (MAX_DUTY - MIN_DUTY)}
-          step={1 / (MAX_DUTY - MIN_DUTY)}
           disabled={!ready}
+          onStep={dutyStep}
           onMove={(p) => dutyMove(MIN_DUTY + p * (MAX_DUTY - MIN_DUTY))}
           onRelease={(p) => dutyCommit(MIN_DUTY + p * (MAX_DUTY - MIN_DUTY))}
         />

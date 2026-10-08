@@ -1,4 +1,4 @@
-import { useRef, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 
 import { cn } from "cn"
 
@@ -18,16 +18,22 @@ export interface Tick {
  * every move while dragged and the final position on release, so a caller can
  * stream the one and commit the other.
  *
- * Keyboard: ← / → step by `step`, with Shift ten times as far; each press is a
- * move and a release.
+ * The wheel and the arrow keys (← ↓ down, → ↑ up, Shift for ten) report whole
+ * steps through `onStep`, which the caller sizes and settles itself: a notch is
+ * not a release, or every notch would be a commit.
  */
+
+// One wheel notch, in pixels (Chrome/Edge); Firefox's line mode counts three a notch.
+const PX_PER_NOTCH = 100
+const PX_PER_LINE = PX_PER_NOTCH / 3
+
 export function RangeSlider({
   position,
   onMove,
   onRelease,
+  onStep,
   ticks = [],
   tone = "signal",
-  step = 0.005,
   disabled,
   label,
   valueText,
@@ -35,9 +41,10 @@ export function RangeSlider({
   position: number
   onMove: (position: number) => void
   onRelease: (position: number) => void
+  /** Whole steps from the wheel or the arrow keys, positive for up. */
+  onStep: (steps: number) => void
   ticks?: Tick[]
   tone?: "signal" | "duty"
-  step?: number
   disabled?: boolean
   label: string
   valueText?: string
@@ -46,6 +53,30 @@ export function RangeSlider({
   const [held, setHeld] = useState(false)
   const last = useRef(position)
   const p = Math.max(0, Math.min(1, position))
+
+  // A native listener: React's wheel handlers are passive and cannot stop the
+  // page from scrolling instead. The latest props via a ref, as it outlives renders.
+  const live = useRef({ onStep, disabled })
+  live.current = { onStep, disabled }
+  useEffect(() => {
+    const node = track.current
+    if (!node) return
+    let carry = 0
+    const onWheel = (e: WheelEvent) => {
+      if (live.current.disabled) return
+      e.preventDefault()
+      const px = e.deltaMode === 1 ? e.deltaY * PX_PER_LINE
+        : e.deltaMode === 2 ? e.deltaY * PX_PER_NOTCH
+        : e.deltaY
+      carry -= px // wheel up is a negative delta and moves the value up
+      const notches = Math.trunc(carry / PX_PER_NOTCH)
+      if (notches === 0) return
+      carry -= notches * PX_PER_NOTCH
+      live.current.onStep(notches)
+    }
+    node.addEventListener("wheel", onWheel, { passive: false })
+    return () => node.removeEventListener("wheel", onWheel)
+  }, [])
 
   function at(clientX: number): number {
     const r = track.current?.getBoundingClientRect()
@@ -96,12 +127,13 @@ export function RangeSlider({
           onRelease(last.current)
         }}
         onKeyDown={(e) => {
-          if (disabled || (e.key !== "ArrowLeft" && e.key !== "ArrowRight")) return
+          if (disabled) return
+          const dir = e.key === "ArrowRight" || e.key === "ArrowUp" ? 1
+            : e.key === "ArrowLeft" || e.key === "ArrowDown" ? -1
+            : 0
+          if (dir === 0) return
           e.preventDefault()
-          const d = (e.key === "ArrowLeft" ? -step : step) * (e.shiftKey ? 10 : 1)
-          const next = Math.max(0, Math.min(1, p + d))
-          onMove(next)
-          onRelease(next)
+          onStep(dir * (e.shiftKey ? 10 : 1))
         }}
       >
         <div className="bg-muted absolute inset-x-0 h-2 rounded-full" />
