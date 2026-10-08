@@ -30,29 +30,24 @@ CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=4096
 # OTA rollback — pairs with esp_ota_mark_app_valid_cancel_rollback() in main.cpp
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 
-# Dynamic frequency scaling: the CPU drops to the XTAL frequency whenever no task
-# holds a power-management lock, which on a device waiting for a request is nearly
-# all the time. DFS_INIT_AUTO configures it from startup code — max = the default
-# CPU frequency, min = XTAL — so no call is needed here; a fork wanting other bounds
-# calls esp_pm_configure() and overrides them. `system info` reports what took.
+# Dynamic frequency scaling (CONFIG_PM_ENABLE + PM_DFS_INIT_AUTO): DELIBERATELY OFF.
 #
-# WiFi holds an APB_FREQ_MAX lock (esp_wifi's "wifi" lock, released only by modem
-# sleep) and WIFI_PS_NONE — set deliberately, see WiFiInterface.cpp — never lets it
-# go. APB at 80 MHz needs the PLL, so with the radio up the floor is 80 MHz and not
-# the XTAL's 40; the 160 -> 80 step is still most of the saving, and the XTAL floor
-# applies while the radio is down between station rounds.
+# Strux turned it on, so the CPU idled at the XTAL frequency (40 MHz on a C3) whenever
+# no task held a power-management lock. On the ESP32-C3 that is not a few microseconds
+# of interrupt latency, it is a station that drops what it receives: on 2026-10-08 the
+# SuperMini associated and completed the WPA2 handshake every time, at -66 dBm, and
+# then never got a DHCP answer -- three 15 s rounds, no address. Compiling PM out, one
+# variable, gave an address 1.6 s after association. DPS50xx measured the same thing
+# on 2026-09-10 (ICMP loss 45 % -> 0 %, command median 3925 ms -> 72 ms) and reads it
+# as the RX path falling behind at a quarter clock, not as slow arithmetic.
 #
-# The cost is a few microseconds of extra interrupt latency and coarser RTOS tick
-# timekeeping. The console is unaffected: esp_pm re-clocks the console UART off
-# REF_TICK/XTAL so its baud rate does not follow APB.
+# Tracked upstream as vanBassum/Strux#59. A Wavy is mains-powered and drives a signal
+# generator; there is nothing to save. LedcSquareWave's PM lock stays and is inert:
+# esp_pm_lock_create fails without CONFIG_PM_ENABLE and the driver skips it.
 #
-# NOT enabled: FREERTOS_USE_TICKLESS_IDLE. It reads like a free prerequisite for
-# light sleep and is not one — esp_pm's get_lowest_allowed_mode() never returns
-# PM_MODE_LIGHT_SLEEP while light_sleep_enable is false, so tickless idle without
-# light sleep buys nothing and still costs tick accuracy. The two go together, and
-# together they are a battery-powered fork's decision, not the template's.
-CONFIG_PM_ENABLE=y
-CONFIG_PM_DFS_INIT_AUTO=y
+# Nothing is asserted here, because the drift guard reads only KEY=value lines and
+# Kconfig's default is already off. A tree generated before this change still records
+# CONFIG_PM_ENABLE=y and keeps it: delete that sdkconfig and re-run set-target.
 
 # lwIP socket budget, and the reason it cannot stay at IDF's default of 10.
 #

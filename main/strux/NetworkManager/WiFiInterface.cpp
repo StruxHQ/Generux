@@ -256,9 +256,21 @@ void WiFiInterface::OnWifiEvent(esp_event_base_t event_base, int32_t event_id, v
         switch (event_id)
         {
         case WIFI_EVENT_STA_CONNECTED:
-            ESP_LOGI(TAG, "STA connected");
+        {
+            // Which radio, on which channel, under which mode: one SSID is routinely
+            // more than one BSSID, and a failure that follows one of them is the AP's.
+            auto* event = static_cast<wifi_event_sta_connected_t*>(event_data);
+            wifi_ap_record_t ap = {};
+            const bool haveAp = esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
+            ESP_LOGI(TAG, "STA connected to " MACSTR " ch%u auth=%s aid=%u rssi=%d phy=%s%s%s%s",
+                     MAC2STR(event->bssid), static_cast<unsigned>(event->channel),
+                     AuthModeName(event->authmode), static_cast<unsigned>(event->aid),
+                     haveAp ? ap.rssi : 0,
+                     haveAp && ap.phy_11b ? "b" : "", haveAp && ap.phy_11g ? "g" : "",
+                     haveAp && ap.phy_11n ? "n" : "", haveAp && ap.phy_11ax ? "ax" : "");
             RaiseEvent(NetworkEventType::LinkUp);
             break;
+        }
 
         case WIFI_EVENT_STA_DISCONNECTED:
         {
@@ -267,7 +279,8 @@ void WiFiInterface::OnWifiEvent(esp_event_base_t event_base, int32_t event_id, v
             // interface's own disconnect echoing back, and retrying on either would
             // burn an attempt that was never made. See NetworkManager's LinkDown arm.
             auto* event = static_cast<wifi_event_sta_disconnected_t*>(event_data);
-            ESP_LOGW(TAG, "STA disconnected (reason %d)", event->reason);
+            ESP_LOGW(TAG, "STA disconnected (reason %d) from " MACSTR " rssi=%d",
+                     event->reason, MAC2STR(event->bssid), event->rssi);
             RaiseEvent(NetworkEventType::LinkDown, event->reason);
             break;
         }
