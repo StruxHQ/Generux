@@ -3,7 +3,7 @@ import { toast } from "sonner"
 import { PowerIcon } from "lucide-react"
 
 import { AutoSweep } from "@/components/AutoSweep"
-import { DigitDisplay, type Unit } from "@/components/DigitDisplay"
+import { DigitDisplay } from "@/components/DigitDisplay"
 import { JogSlider } from "@/components/JogSlider"
 import { RangeSlider, type Tick } from "@/components/RangeSlider"
 import { ScopeView } from "@/components/ScopeView"
@@ -62,10 +62,6 @@ function logTicks(min: number, max: number): Tick[] {
   return ticks
 }
 
-function unitFor(hz: number): Unit {
-  return hz >= 1e6 ? "MHz" : hz >= 1000 ? "kHz" : "Hz"
-}
-
 /**
  * The home screen, and it is the product: a square-wave generator
  * (main/app/WaveManager on the firmware side).
@@ -81,15 +77,6 @@ export default function HomePage() {
   const min = state?.min ?? 5
   const max = state?.max ?? 1_000_000
   const clamp = (hz: number) => Math.max(min, Math.min(max, Math.round(hz)))
-
-  // ── Display unit: seeded from the first state, the user's choice after that.
-  const [unit, setUnit] = useState<Unit>("kHz")
-  const [seeded, setSeeded] = useState(false)
-  useEffect(() => {
-    if (seeded || !state) return
-    setUnit(unitFor(state.freq))
-    setSeeded(true)
-  }, [state, seeded])
 
   // ── Commit. `landed` is the frequency last sent until the device's reply to it
   // arrives, so a second change before the first reply builds on the first and
@@ -303,8 +290,7 @@ export default function HomePage() {
           className="flex flex-col">
           {/* Centred in whatever height the scope beside it gives the row. */}
           <div className="flex flex-1 flex-col justify-center py-3">
-            <DigitDisplay hz={setHz} max={max} unit={unit} onUnit={setUnit}
-              onNudge={nudge} disabled={!ready} dim={!running && ready} />
+            <DigitDisplay hz={setHz} max={max} onNudge={nudge} disabled={!ready} dim={!running && ready} />
           </div>
           <p className="text-muted-foreground mt-2 text-sm">
             Click a digit to select · Scroll or use ↑↓ to adjust · Hold for faster changes

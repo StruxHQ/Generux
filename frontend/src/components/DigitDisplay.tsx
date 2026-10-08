@@ -3,10 +3,6 @@ import { ChevronDownIcon, ChevronUpIcon } from "lucide-react"
 
 import { cn } from "cn"
 
-export type Unit = "Hz" | "kHz" | "MHz"
-export const UNITS: Unit[] = ["Hz", "kHz", "MHz"]
-const DECIMALS: Record<Unit, number> = { Hz: 0, kHz: 3, MHz: 6 }
-
 // One wheel notch, in pixels. Chrome and Edge report 100 per notch of a mouse wheel;
 // a trackpad sends many small deltas, which add up to notches the same way.
 const PX_PER_NOTCH = 100
@@ -24,37 +20,34 @@ const REPEAT_MIN_MS = 30
  * or ↑ / ↓ to step it; hold the arrows for faster changes; ← / → move the
  * selection; typing a digit sets it.
  *
- * Every unit shows the same digits — whole hertz, as many as `max` has — and only
- * the decimal point moves, so the layout never jumps and a leading zero is there
- * to be scrolled up. Zeros ahead of the first significant digit are dimmed.
+ * Always whole hertz, with a dot between every group of three digits
+ * (1.000.000), and always as many digits as `max` has, so the layout never jumps
+ * and a leading zero is there to be scrolled up. Zeros ahead of the first
+ * significant digit are dimmed, the separators among them too.
  *
  * Reports changes as a delta in hertz; clamping and carrying are the caller's.
  */
 export function DigitDisplay({
   hz,
   max,
-  unit,
-  onUnit,
   onNudge,
   disabled,
   dim,
 }: {
   hz: number
   max: number
-  unit: Unit
-  onUnit: (u: Unit) => void
   onNudge: (deltaHz: number) => void
   disabled?: boolean
   dim?: boolean
 }) {
   const total = String(Math.round(max)).length
   const digits = String(Math.max(0, Math.round(hz))).padStart(total, "0").slice(-total)
-  const point = total - DECIMALS[unit] // index the decimal point goes before
   const places = Array.from({ length: total }, (_, i) => 10 ** (total - 1 - i))
 
-  // The selected digit, by the value it stands for. Starts on the unit's ones.
-  const [place, setPlace] = useState(() => 10 ** DECIMALS[unit])
-  const firstSignificant = Math.min(digits.search(/[1-9]/) === -1 ? total : digits.search(/[1-9]/), point - 1)
+  // The selected digit, by the value it stands for. Starts on the kilohertz.
+  const [place, setPlace] = useState(1000)
+  const nonZero = digits.search(/[1-9]/)
+  const firstSignificant = nonZero === -1 ? total - 1 : nonZero
 
   // Latest props for handlers that outlive a render (wheel listener, repeat timer).
   const live = useRef({ onNudge, place, disabled })
@@ -111,14 +104,13 @@ export function DigitDisplay({
   }
 
   return (
-    <div className="flex flex-col gap-3 sm:flex-row sm:items-stretch">
       <div
         ref={box}
         tabIndex={disabled ? -1 : 0}
         role="group"
-        aria-label="Frequency digits"
+        aria-label="Frequency in hertz"
         className={cn(
-          "bg-background/60 flex min-w-0 flex-1 items-center justify-center gap-1 rounded-xl border px-2 py-6 outline-none sm:gap-1.5 sm:px-3",
+          "bg-background/60 flex min-w-0 items-center justify-center gap-0.5 rounded-xl border px-2 py-6 outline-none sm:gap-1.5 sm:px-4",
           "focus-visible:ring-ring/50 focus-visible:ring-3",
           disabled && "opacity-50",
         )}
@@ -142,9 +134,13 @@ export function DigitDisplay({
           const p = places[i]
           const selected = p === place && !disabled
           return (
-            <div key={i} className="flex items-center gap-1 sm:gap-1.5">
-              {i === point && i > 0 && (
-                <span className="text-foreground self-end pb-1 text-2xl font-bold sm:text-4xl">.</span>
+            <div key={i} className="flex items-center gap-0.5 sm:gap-1.5">
+              {/* A dot between every group of three, counted from the right. */}
+              {i > 0 && (total - i) % 3 === 0 && (
+                <span className={cn(
+                  "self-end pb-1 text-2xl font-bold sm:text-4xl",
+                  i <= firstSignificant ? "text-muted-foreground/40" : "text-foreground",
+                )}>.</span>
               )}
               <div className="relative">
                 {selected && (
@@ -162,7 +158,7 @@ export function DigitDisplay({
                   disabled={disabled}
                   onClick={() => { setPlace(p); box.current?.focus() }}
                   className={cn(
-                    "flex h-14 w-8 items-center justify-center rounded-lg border text-3xl font-bold tabular-nums transition-colors sm:h-20 sm:w-12 sm:text-5xl",
+                    "flex h-14 w-7 items-center justify-center rounded-lg border text-3xl font-bold tabular-nums transition-colors sm:h-20 sm:w-12 sm:text-5xl",
                     selected
                       ? "border-signal text-signal bg-signal/10 shadow-[0_0_14px_-2px_var(--signal)]"
                       : "bg-muted/60 hover:bg-muted border-transparent",
@@ -183,24 +179,7 @@ export function DigitDisplay({
             </div>
           )
         })}
+        <span className="text-muted-foreground ml-1.5 self-end pb-1 text-xl font-bold sm:ml-3 sm:text-3xl">Hz</span>
       </div>
-
-      <div className="relative sm:self-center">
-        <select
-          aria-label="Display unit"
-          value={unit}
-          disabled={disabled}
-          onChange={(e) => {
-            const u = e.target.value as Unit
-            onUnit(u)
-            setPlace(10 ** DECIMALS[u])
-          }}
-          className="bg-background/60 hover:bg-muted h-11 w-full appearance-none rounded-xl border pr-9 pl-3 text-lg font-bold sm:w-auto outline-none focus-visible:ring-3 focus-visible:ring-ring/50 sm:h-20 sm:pl-4 sm:text-2xl"
-        >
-          {UNITS.map((u) => <option key={u} value={u}>{u}</option>)}
-        </select>
-        <ChevronDownIcon className="text-signal pointer-events-none absolute top-1/2 right-2.5 size-5 -translate-y-1/2" />
-      </div>
-    </div>
   )
 }
