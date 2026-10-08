@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react"
 import { toast } from "sonner"
 
 import { AutoSweep } from "@/components/AutoSweep"
+import { FrequencyReadout } from "@/components/FrequencyReadout"
 import { JogSlider } from "@/components/JogSlider"
 import { ScopeView } from "@/components/ScopeView"
 import { Button } from "@/components/ui/button"
@@ -11,7 +12,7 @@ import { Label } from "@/components/ui/label"
 import { Separator } from "@/components/ui/separator"
 import { Switch } from "@/components/ui/switch"
 import { cn } from "cn"
-import { formatHz, formatPeriod, hzParts, parseHz, useWave } from "@/hooks/use-wave"
+import { formatHz, formatPeriod, parseHz, useWave } from "@/hooks/use-wave"
 import type { SweepPlan } from "@/components/AutoSweep"
 
 const PRESETS = [50, 100, 1_000, 5_000, 10_000, 20_000, 50_000, 100_000]
@@ -22,6 +23,12 @@ const STEPS = [10_000, 1_000, 100, 10, 1]
 // moves about 2% a second, all the way out doubles the frequency three times a
 // second — the whole 5 Hz to 100 kHz range in under five seconds.
 const MAX_OCTAVES_PER_S = 3
+
+// Scrolling the readout streams each notch unpersisted and commits once the wheel
+// has been still this long: one flash write per adjustment, not one per notch.
+const WHEEL_SETTLE_MS = 600
+// A notch off the digits moves the frequency by this factor.
+const WHEEL_FACTOR = 1.01
 
 type Unit = "Hz" | "kHz"
 const SCALE: Record<Unit, number> = { Hz: 1, kHz: 1000 }
@@ -96,6 +103,7 @@ export default function HomePage() {
   /// Start or hand over a motion. A handover (auto sweep -> jog) carries on from
   /// where the frequency is; a fresh start begins at `from`, or at the current one.
   function startMotion(m: Motion, from?: number) {
+    endWheel()
     if (from !== undefined) hz.current = from
     else if (!motion.current) hz.current = base()
     motion.current = m
@@ -148,9 +156,43 @@ export default function HomePage() {
     commit(clamp(hz.current))
   }
 
+  // ── Wheel: discrete steps, streamed like a motion and committed once it settles.
+  // `wheelHz` is where the scrolling has got to, ahead of any reply.
+  const wheelHz = useRef<number | null>(null)
+  const wheelTimer = useRef<number | null>(null)
+
+  function onWheelStep(place: number | null, notches: number) {
+    if (!ready) return
+    stopMotion()
+    const from = wheelHz.current ?? base()
+    let next = place !== null ? from + place * notches : Math.round(from * WHEEL_FACTOR ** notches)
+    if (next === from) next += Math.sign(notches) // 1% of a low frequency rounds to nothing
+    next = clamp(next)
+
+    wheelHz.current = next
+    setLiveHz(next)
+    showTyped(next)
+    sweepTo(next)
+    if (wheelTimer.current !== null) clearTimeout(wheelTimer.current)
+    wheelTimer.current = window.setTimeout(endWheel, WHEEL_SETTLE_MS)
+  }
+
+  /// Commit a scroll still settling. Every other control calls this first, so it
+  /// builds on where the wheel left the frequency.
+  function endWheel() {
+    if (wheelTimer.current !== null) clearTimeout(wheelTimer.current)
+    wheelTimer.current = null
+    const f = wheelHz.current
+    if (f === null) return
+    wheelHz.current = null
+    setLiveHz(null)
+    commit(f)
+  }
+
   useEffect(
     () => () => {
       if (frame.current !== null) cancelAnimationFrame(frame.current)
+      if (wheelTimer.current !== null) clearTimeout(wheelTimer.current)
     },
     [],
   )
@@ -163,6 +205,7 @@ export default function HomePage() {
 
   /// Any discrete control first ends a motion, so it builds on where that stopped.
   function jump(to: (current: number) => number) {
+    endWheel()
     stopMotion()
     commit(clamp(to(base())))
   }
@@ -171,11 +214,10 @@ export default function HomePage() {
   const ready = state !== null
   const running = state?.enabled === true
   const shownHz = liveHz ?? (state ? (running ? state.actual : state.freq) : 0)
-  const parts = hzParts(shownHz)
   const current = liveHz ?? base()
 
   let caption = ""
-  if (liveHz !== null) caption = `Sweeping · period ${formatPeriod(liveHz)}`
+  if (liveHz !== null) caption = `Adjusting · period ${formatPeriod(liveHz)}`
   else if (state && running)
     caption = `Period ${formatPeriod(state.actual)}` +
       (state.actual !== state.freq ? ` · set to ${formatHz(state.freq)}` : "")
@@ -210,13 +252,10 @@ export default function HomePage() {
           <CardContent className="space-y-5">
             <div className="text-center">
               <p className="text-muted-foreground text-sm">Frequency</p>
-              <p className={cn("tabular-nums", !running && ready && "opacity-60")}>
-                <span className="text-5xl font-bold tracking-tight sm:text-6xl">
-                  {ready ? parts.value : "…"}
-                </span>
-                <span className="text-muted-foreground ml-2 text-2xl sm:text-3xl">{parts.unit}</span>
-              </p>
+              <FrequencyReadout hz={shownHz} ready={ready} dim={!running && ready}
+                onStep={onWheelStep} />
               <p className="text-muted-foreground mt-1 h-5 text-sm">{caption}</p>
+              <p className="text-muted-foreground text-xs">Scroll over a digit to change it</p>
             </div>
 
             <div className="grid grid-cols-5 gap-1.5">
