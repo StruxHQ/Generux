@@ -36,7 +36,11 @@ export default function App() {
       <AppSidebar currentPage={page} onNavigate={navigate} />
       <main className="flex h-screen w-full min-w-0 flex-col overflow-hidden p-6">
         <SidebarTrigger className="shrink-0 md:hidden" />
-        <div className="min-h-0 w-full flex-1 overflow-y-auto">
+        {/* relative: an absolutely positioned descendant with no positioned ancestor
+            in here (radix's hidden form <input> behind a Switch) is otherwise laid
+            out against the page, not this box -- it is not clipped by this
+            scroller, and it stretches the DOCUMENT, giving a second scrollbar. */}
+        <div className="relative min-h-0 w-full flex-1 overflow-y-auto">
           <PageContent page={page} />
         </div>
       </main>

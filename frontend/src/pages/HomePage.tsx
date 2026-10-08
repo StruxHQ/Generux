@@ -267,7 +267,7 @@ export default function HomePage() {
   else if (state && !running) note = "Output off · starts at this frequency"
 
   return (
-    <div className="mx-auto max-w-5xl space-y-4">
+    <div className="w-full space-y-4">
       <header className="flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-3">
           <svg viewBox="0 0 32 24" className="h-8 w-11 shrink-0" aria-hidden>
@@ -299,8 +299,10 @@ export default function HomePage() {
       </header>
 
       <div className="grid gap-4 lg:grid-cols-[3fr_2fr]">
-        <Panel title="Frequency" aside={`${formatHz(min)} – ${formatHz(max)}`}>
-          <div className="py-3">
+        <Panel title="Frequency" aside={`${formatHz(min)} – ${formatHz(max)}`}
+          className="flex flex-col">
+          {/* Centred in whatever height the scope beside it gives the row. */}
+          <div className="flex flex-1 flex-col justify-center py-3">
             <DigitDisplay hz={setHz} max={max} unit={unit} onUnit={setUnit}
               onNudge={nudge} disabled={!ready} dim={!running && ready} />
           </div>
@@ -456,9 +458,14 @@ export default function HomePage() {
   )
 }
 
-function Panel({ title, aside, children }: { title?: string; aside?: ReactNode; children: ReactNode }) {
+function Panel({ title, aside, className, children }: {
+  title?: string
+  aside?: ReactNode
+  className?: string
+  children: ReactNode
+}) {
   return (
-    <section className="bg-card min-w-0 rounded-2xl border p-4 shadow-xs sm:p-5">
+    <section className={cn("bg-card min-w-0 rounded-2xl border p-4 shadow-xs sm:p-5", className)}>
       {(title || aside) && (
         <div className="mb-3 flex items-center justify-between gap-3">
           {title && (
