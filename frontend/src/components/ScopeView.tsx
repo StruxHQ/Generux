@@ -26,13 +26,19 @@ function formatTime(s: number): string {
 }
 
 /**
- * What the pin is doing, drawn the way a scope would show it: a 50% duty square
- * wave at `hz`, on an automatic 1-2-5 timebase. Drawn from the reported frequency,
+ * What the pin is doing, drawn the way a scope would show it: a square wave at
+ * `hz` and `duty`, on an automatic 1-2-5 timebase. Drawn from the reported frequency,
  * not measured — it is a picture of the setting, not a probe.
  *
  * Dark in both themes on purpose: it is a screen.
  */
-export function ScopeView({ hz, on, className }: { hz: number; on: boolean; className?: string }) {
+export function ScopeView({ hz, duty = 50, on, className }: {
+  hz: number
+  /** Percent of each period spent high. */
+  duty?: number
+  on: boolean
+  className?: string
+}) {
   const high = H * 0.25
   const low = H * 0.75
   let d: string
@@ -41,14 +47,12 @@ export function ScopeView({ hz, on, className }: { hz: number; on: boolean; clas
   if (on && hz > 0) {
     div = timebase(hz)
     const span = div * DIVS_X
-    const half = W / (2 * hz * span) // half a period, in pixels
+    const period = W / (hz * span) // one period, in pixels
+    const up = period * Math.max(0, Math.min(100, duty)) / 100
     d = `M 0 ${high}`
-    let level = high
-    for (let x = half; x < W; x += half) {
-      level = level === high ? low : high
-      d += ` H ${x} V ${level}`
+    for (let x = 0; x < W; x += period) {
+      d += ` H ${Math.min(W, x + up)} V ${low} H ${Math.min(W, x + period)} V ${high}`
     }
-    d += ` H ${W}`
   } else {
     d = `M 0 ${low} H ${W}`
   }
@@ -56,7 +60,7 @@ export function ScopeView({ hz, on, className }: { hz: number; on: boolean; clas
   return (
     <div className={cn("relative overflow-hidden rounded-xl bg-zinc-950", className)}>
       <svg viewBox={`0 0 ${W} ${H}`} className="block h-auto w-full" role="img"
-        aria-label={on ? `Square wave at ${hz} Hz` : "Output off, held low"}>
+        aria-label={on ? `Square wave at ${hz} Hz, ${duty}% duty` : "Output off, held low"}>
         {Array.from({ length: DIVS_X - 1 }, (_, i) => (
           <line key={`x${i}`} x1={((i + 1) * W) / DIVS_X} x2={((i + 1) * W) / DIVS_X} y1={0} y2={H}
             className="stroke-zinc-800" strokeWidth={1} />
@@ -67,7 +71,10 @@ export function ScopeView({ hz, on, className }: { hz: number; on: boolean; clas
             strokeWidth={1} strokeDasharray={i === DIVS_Y / 2 - 1 ? "4 4" : undefined} />
         ))}
         <path d={d} fill="none" className={on ? "stroke-signal" : "stroke-zinc-600"}
-          strokeWidth={3} strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
+          strokeWidth={3} strokeLinejoin="round" vectorEffect="non-scaling-stroke"
+          style={on ? { filter: "drop-shadow(0 0 4px var(--signal))" } : undefined} />
+        <text x={6} y={high - 8} className="fill-zinc-500 text-[11px] font-semibold tracking-wider">HIGH</text>
+        <text x={6} y={low + 18} className="fill-zinc-500 text-[11px] font-semibold tracking-wider">LOW</text>
       </svg>
       <span className="absolute right-3 bottom-2 font-mono text-xs text-zinc-400">
         {on ? `${formatTime(div)}/div` : "Output off"}

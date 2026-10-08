@@ -30,24 +30,24 @@
 namespace DeviceDoc {
 
 inline constexpr const char* DESCRIPTION =
-    "Wavy square-wave generator - one pin, 50% duty, 5 Hz to 13.3 MHz, set from "
+    "Wavy square-wave generator - one pin, 5 Hz to 1 MHz, duty 1-99%, set from "
     "the web UI.";
 
 inline constexpr const char* INSTRUCTIONS =
     "This is Wavy, a square-wave generator built on the Strux template. It drives "
-    "one pin with a 50% duty square wave at a frequency you choose.\n"
+    "one pin with a square wave at a frequency and duty cycle you choose.\n"
     "\n"
     "The square wave\n"
-    "  `wave get` reports whether the output is on, the frequency set (`freq`), the "
-    "frequency actually produced (`actual`, 0 while off) and the allowed range "
-    "(`min`/`max`, in Hz). `wave set -freq 25000 -enabled true` changes either or "
-    "both; omitted arguments keep their value. Changes apply at once and are "
-    "persisted, so the output resumes after a reboot. Up to 500 kHz `actual` "
-    "differs from `freq` by up to about 0.1%, when 80 MHz is not a whole multiple "
-    "of it. Above 500 kHz the output snaps to the nearest 40 MHz / n (13.333, 10, "
-    "8, 6.667 ... MHz) so that every period is identical, and `actual` says which "
-    "one it reached. The range stops at 13.333 MHz because faster outputs disrupt "
-    "the device's own WiFi. The pin is GPIO4 on the "
+    "  `wave get` reports whether the output is on, the frequency set (`freq`) and "
+    "produced (`actual`, 0 while off), the duty set (`duty`, whole percent) and "
+    "produced (`dutyActual`, percent, 0 while off), and the allowed frequency range "
+    "(`min`/`max`, in Hz). `wave set freq=25000 duty=30 enabled=true` changes any "
+    "of them; omitted arguments keep their value. Changes apply at once and are "
+    "persisted, so the output resumes after a reboot. `actual` can differ from "
+    "`freq` by up to about 0.1% when 80 MHz is not a whole multiple of it. The duty "
+    "is reached in steps of 1/2^n of a period: 1.6% at 1 MHz, finer below. The "
+    "range stops at 1 MHz, where those steps are still fine enough to be worth "
+    "having. The pin is GPIO4 on the "
     "ESP32-C3 SuperMini and GPIO25 on the ESP32 DevKit; it is held low while off.\n"
     "\n"
     "Discovering what it can do\n"

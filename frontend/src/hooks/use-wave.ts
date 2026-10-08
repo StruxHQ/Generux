@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { backend, type WaveState } from "@/lib/backend"
+import { backend, type WaveParams, type WaveState } from "@/lib/backend"
 
 // The output only changes when somebody sets it, but that somebody may be another
 // browser or the relay, so the page still re-reads now and then.
@@ -46,7 +46,7 @@ export function useWave() {
   /// Not optimistic: the device's reply carries the frequency it actually reached,
   /// which is the number worth showing. Resolves to an error message, or null.
   const set = useCallback(
-    async (params: { enabled?: boolean; freq?: number }): Promise<string | null> => {
+    async (params: WaveParams): Promise<string | null> => {
       setBusy(true)
       try {
         const s = await backend.setWave(params)
@@ -61,18 +61,19 @@ export function useWave() {
     [],
   )
 
-  // Live sweep steps. At most one in flight and only the newest waiting, so a
-  // sweep never queues up behind a slow link: the device always gets the latest
-  // value next, and every step in between that it missed is one nobody needed.
-  const pending = useRef<number | null>(null)
+  // Live steps, of the frequency or the duty. At most one in flight and only the
+  // newest waiting, so a sweep never queues up behind a slow link: the device
+  // always gets the latest value next, and every step in between that it missed is
+  // one nobody needed.
+  const pending = useRef<WaveParams | null>(null)
   const inFlight = useRef(false)
   const pump = useCallback(() => {
     if (inFlight.current || pending.current === null) return
-    const freq = pending.current
+    const params = pending.current
     pending.current = null
     inFlight.current = true
     backend
-      .setWave({ freq, persist: false })
+      .setWave({ ...params, persist: false })
       .then((s) => {
         if (alive.current) setState(s)
       })
@@ -85,10 +86,18 @@ export function useWave() {
       })
   }, [])
 
-  /// Send a sweep step: applied on the device, not written to flash.
+  /// Send a live step: applied on the device, not written to flash.
   const sweepTo = useCallback(
     (freq: number) => {
-      pending.current = freq
+      pending.current = { ...pending.current, freq }
+      pump()
+    },
+    [pump],
+  )
+
+  const dutyTo = useCallback(
+    (duty: number) => {
+      pending.current = { ...pending.current, duty }
       pump()
     },
     [pump],
@@ -104,7 +113,15 @@ export function useWave() {
     [set],
   )
 
-  return { state, busy, error, set, sweepTo, sweepEnd, refresh }
+  const dutyEnd = useCallback(
+    (duty: number) => {
+      pending.current = null
+      return set({ duty })
+    },
+    [set],
+  )
+
+  return { state, busy, error, set, sweepTo, sweepEnd, dutyTo, dutyEnd, refresh }
 }
 
 /// "10 MHz", "1.5 kHz", "440 Hz".

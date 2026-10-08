@@ -6,32 +6,31 @@
 #include "esp_pm.h"
 #include "esp_log.h"
 #include "soc/soc_caps.h"
-#include <algorithm>
 
 // ──────────────────────────────────────────────────────────────
-// Square wave on one pin from an LEDC timer, 50% duty. Pin injected by
-// the board; this driver takes LEDC timer 0 / channel 0 in low-speed mode
-// for itself.
+// Square wave on one pin from an LEDC timer, duty set in whole percent.
+// Pin injected by the board; this driver takes LEDC timer 0 / channel 0 in
+// low-speed mode for itself.
 //
 // The timer counts a clock divided by a 10.8 fixed-point divider, and the
-// period is 2^bits counts. 50% duty needs only one bit, so the resolution
-// is free to be chosen for the DIVIDER instead: when APB/hz is a whole
-// number, a resolution is picked that leaves an integer divider, and the
-// output has no jitter at all (100 kHz = 80 MHz / 25 / 2^5). Otherwise the
-// fractional divider dithers between two neighbouring periods — one APB
-// cycle, 12.5 ns — and averages out to the requested frequency. Above
-// DITHER_MAX_HZ that dither is too large a share of the period, and the
-// output snaps to the nearest whole divider instead (40 MHz at the top).
+// period is 2^bits counts; the duty is a whole number of those counts. So the
+// resolution decides how finely the duty can be set (1 MHz leaves 6 bits, a
+// step of 1.6 %), and the divider decides the frequency. When APB/hz is a
+// whole number a resolution exists that leaves an integer divider and the
+// output has no jitter at all (100 kHz = 80 MHz / 25 / 2^5); it is taken
+// when it reaches the duty as closely as the finest resolution does — always
+// at 50 %. Otherwise the finest resolution is used and the fractional divider
+// dithers between two neighbouring periods — one APB cycle, 12.5 ns, 1.25 %
+// of a period at 1 MHz — averaging out to the requested frequency.
 //
-// Retuning a running output only rewrites the divider, which low-speed
-// mode latches at the end of the current period: no reset, no runt pulse,
-// so a sweep is continuous. The timer is only reconfigured (and reset) when
-// the resolution has to change — once per octave or so in a sweep, and
-// whenever an exact divider is on offer at a different resolution.
+// Retuning a running output only rewrites the divider and the duty, both of
+// which low-speed mode latches at the end of the current period: no reset, no
+// runt pulse, so a sweep is continuous. The timer is only reconfigured (and
+// reset) when the resolution has to change.
 //
-// The clock is APB, which dynamic frequency scaling drops to 40 MHz when
-// the CPU idles — halving the output. A PM lock pins APB at 80 MHz for as
-// long as the wave runs, and only then.
+// The clock is APB, which dynamic frequency scaling would drop to 40 MHz when
+// the CPU idles — halving the output. A PM lock pins APB at 80 MHz for as long
+// as the wave runs, and only then (inert while PM is compiled out).
 // ──────────────────────────────────────────────────────────────
 
 class LedcSquareWave : public SquareWave
@@ -50,13 +49,6 @@ class LedcSquareWave : public SquareWave
     // least 1.0. The same on every chip this template targets.
     static constexpr uint64_t DIV_MIN = 1u << 8;
     static constexpr uint64_t DIV_MAX = (1u << 18) - 1;
-
-    // Above this a fractional divider stops being worth having. Its dither moves an
-    // edge by one APB cycle, 12.5 ns, which is 0.6% of a period here and a whole
-    // half-period at 40 MHz, where 25 MHz would come out as 40 and 20 MHz cycles
-    // taking turns. So above it the output snaps to APB / 2 / n -- 40, 20, 13.33, 10,
-    // 8 ... MHz, 1.25% apart at this end -- and reports what it reached.
-    static constexpr uint32_t DITHER_MAX_HZ = 500'000;
 
 public:
     explicit LedcSquareWave(int pin)
@@ -79,36 +71,29 @@ public:
             pmLock_ = nullptr;
     }
 
-    bool Start(uint32_t hz) override
+    bool Start(uint32_t hz, uint32_t dutyPercent) override
     {
-        uint32_t bits;
-        if (hz > DITHER_MAX_HZ)
-        {
-            // Snap to APB / 2 / n: one-bit resolution and a whole divider, so every
-            // period is identical. The frequency handed to the driver is truncated,
-            // which leaves the divider it computes a hair above n -- n, either way it
-            // rounds.
-            const uint32_t n = std::max<uint32_t>(1, (APB_HZ / 2 + hz / 2) / hz);
-            hz = APB_HZ / 2 / n;
-            bits = 1;
-            if (running_ && bits_ == bits && ledc_set_freq(MODE, TIMER, hz) == ESP_OK)
-            {
-                actualHz_ = ledc_get_freq(MODE, TIMER);
-                return true;
-            }
-        }
-        else
-        {
-            if (running_ && Retune(hz))
-                return true;
-            bits = PickResolution(hz);
-        }
-
+        const uint32_t bits = PickResolution(hz, dutyPercent);
         if (bits == 0)
         {
             ESP_LOGW(TAG, "%lu Hz is out of reach", (unsigned long)hz);
             Stop();
             return false;
+        }
+        const uint32_t counts = DutyCounts(bits, dutyPercent);
+
+        // Same resolution: rewrite divider and duty in place, latched at the end
+        // of the current period.
+        if (running_ && bits == bits_ && ledc_set_freq(MODE, TIMER, hz) == ESP_OK)
+        {
+            if (counts != counts_)
+            {
+                ledc_set_duty(MODE, CHANNEL, counts);
+                ledc_update_duty(MODE, CHANNEL);
+                counts_ = counts;
+            }
+            actualHz_ = ledc_get_freq(MODE, TIMER);
+            return true;
         }
 
         if (!running_ && pmLock_)
@@ -127,7 +112,7 @@ public:
         channel.speed_mode = MODE;
         channel.channel = CHANNEL;
         channel.timer_sel = TIMER;
-        channel.duty = 1u << (bits - 1);
+        channel.duty = counts;
         channel.hpoint = 0;
 
         if (ledc_timer_config(&timer) != ESP_OK || ledc_channel_config(&channel) != ESP_OK)
@@ -138,9 +123,11 @@ public:
         }
 
         bits_ = bits;
+        counts_ = counts;
         actualHz_ = ledc_get_freq(MODE, TIMER);
-        ESP_LOGD(TAG, "%lu Hz requested, %lu Hz out (%lu bits)",
-                 (unsigned long)hz, (unsigned long)actualHz_, (unsigned long)bits);
+        ESP_LOGD(TAG, "%lu Hz requested, %lu Hz out (%lu bits, duty %lu/%lu)",
+                 (unsigned long)hz, (unsigned long)actualHz_, (unsigned long)bits,
+                 (unsigned long)counts, (unsigned long)(1u << bits));
         return true;
     }
 
@@ -158,25 +145,38 @@ public:
 
     uint32_t GetFrequency() const override { return actualHz_; }
 
+    float GetDuty() const override
+    {
+        return running_ ? 100.0f * counts_ / static_cast<float>(1u << bits_) : 0.0f;
+    }
+
 private:
     gpio_num_t pin_;
     esp_pm_lock_handle_t pmLock_ = nullptr;
     bool running_ = false;
     uint32_t actualHz_ = 0;
     uint32_t bits_ = 0;
+    uint32_t counts_ = 0;
 
-    /// Move a running output to `hz` by rewriting the divider alone. False when
-    /// that is not the right move — the current resolution cannot reach `hz`, or
-    /// a different one would make it exact — and the caller reconfigures.
-    bool Retune(uint32_t hz)
+    /// The duty in counts of a 2^bits period, rounded, and never 0 or the whole
+    /// period: either would stop the output being a square wave at all.
+    static uint32_t DutyCounts(uint32_t bits, uint32_t percent)
     {
-        const uint32_t exact = ExactResolution(hz);
-        const bool keep = exact ? exact == bits_ : DividerValid(hz, bits_);
-        if (!keep || ledc_set_freq(MODE, TIMER, hz) != ESP_OK)
-            return false;
+        const uint32_t full = 1u << bits;
+        uint32_t c = (percent * full + 50) / 100;
+        if (c < 1) c = 1;
+        if (c > full - 1) c = full - 1;
+        return c;
+    }
 
-        actualHz_ = ledc_get_freq(MODE, TIMER);
-        return true;
+    /// How far the reachable duty at this resolution lands from `percent`, in
+    /// hundredths of a percent (scaled to stay in integers).
+    static uint32_t DutyError(uint32_t bits, uint32_t percent)
+    {
+        const uint64_t full = 1ull << bits;
+        const uint64_t got = (uint64_t)DutyCounts(bits, percent) * 10000 / full;  // percent x100
+        const uint64_t want = (uint64_t)percent * 100;
+        return static_cast<uint32_t>(got > want ? got - want : want - got);
     }
 
     static bool DividerValid(uint32_t hz, uint32_t bits)
@@ -200,15 +200,23 @@ private:
         return 0;
     }
 
-    /// Timer resolution for `hz`, or 0 when no divider reaches it: exact if that
-    /// is on offer, otherwise the finest timing a fractional divider allows.
-    static uint32_t PickResolution(uint32_t hz)
+    /// The most bits any divider allows for `hz`, or 0 when none reaches it.
+    static uint32_t FinestResolution(uint32_t hz)
     {
-        if (const uint32_t exact = ExactResolution(hz))
-            return exact;
         for (uint32_t bits = SOC_LEDC_TIMER_BIT_WIDTH; bits >= 1; bits--)
             if (DividerValid(hz, bits))
                 return bits;
         return 0;
+    }
+
+    /// Exact divider when it reaches the duty as well as the finest resolution
+    /// does (no jitter, no cost), the finest resolution otherwise.
+    static uint32_t PickResolution(uint32_t hz, uint32_t percent)
+    {
+        const uint32_t finest = FinestResolution(hz);
+        const uint32_t exact = ExactResolution(hz);
+        if (exact && finest && DutyError(exact, percent) <= DutyError(finest, percent))
+            return exact;
+        return finest;
     }
 };

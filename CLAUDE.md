@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Wavy is a square-wave generator: one pin, 50% duty, 5 Hz–13.3 MHz (whole dividers of 40 MHz above 500 kHz; 20 MHz and up kill the board's own Wi-Fi, see `WaveManager::MAX_HZ`), set from the web UI (`WaveManager` in `main/app/`, `LedcSquareWave` in `main/hardware/drivers/`). It is a fork of **Strux**, a template/foundation for ESP32 firmware (ESP-IDF v6.0, C++, FreeRTOS) with a React web UI. The framework under `main/strux/` keeps the Strux names (`StruxContext`, `StruxProvider`, the `X-Strux-Token` relay header) on purpose, so improvements can be backported between this repo and the template — keep it generic, and put Wavy-specific code in `main/app/` and `main/hardware/`. "Strux" in the rest of this file means that framework.
+Wavy is a square-wave generator: one pin, 5 Hz–1 MHz, duty 1–99 % (see `WaveManager::MAX_HZ` for why the top is there), set from the web UI (`WaveManager` in `main/app/`, `LedcSquareWave` in `main/hardware/drivers/`). It is a fork of **Strux**, a template/foundation for ESP32 firmware (ESP-IDF v6.0, C++, FreeRTOS) with a React web UI. The framework under `main/strux/` keeps the Strux names (`StruxContext`, `StruxProvider`, the `X-Strux-Token` relay header) on purpose, so improvements can be backported between this repo and the template — keep it generic, and put Wavy-specific code in `main/app/` and `main/hardware/`. "Strux" in the rest of this file means that framework.
 
 ## Working on it
 

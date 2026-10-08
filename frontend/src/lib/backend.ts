@@ -754,10 +754,10 @@ class BackendService {
     return this.send<WaveState>("wave get")
   }
 
-  /** Sets the frequency and/or switches the output. Omitted fields keep their value.
-   *  `persist: false` applies without writing flash (sweep steps). An out-of-range
-   *  frequency comes back with `ok: false` and `error`, not a throw. */
-  async setWave(params: { enabled?: boolean; freq?: number; persist?: boolean }): Promise<WaveState> {
+  /** Sets the frequency and/or duty and/or switches the output. Omitted fields keep
+   *  their value. `persist: false` applies without writing flash (sweep steps). An
+   *  out-of-range value comes back with `ok: false` and `error`, not a throw. */
+  async setWave(params: WaveParams & { persist?: boolean }): Promise<WaveState> {
     return this.send<WaveState>("wave set", params)
   }
 
@@ -1182,6 +1182,13 @@ export interface CommandRegistry {
   commands: CommandDesc[]
 }
 
+// A type, not an interface: it is sent as the command's argument record.
+export type WaveParams = {
+  enabled?: boolean
+  freq?: number
+  duty?: number
+}
+
 export interface WaveState {
   ok: boolean
   error?: string
@@ -1191,6 +1198,10 @@ export interface WaveState {
   freq: number
   /** The frequency the hardware actually produces, in Hz; 0 while off. */
   actual: number
+  /** The duty set, whole percent (1-99). */
+  duty: number
+  /** The duty the hardware actually produces, percent; 0 while off. */
+  dutyActual: number
   /** The range `freq` must be in, in Hz. */
   min: number
   max: number
